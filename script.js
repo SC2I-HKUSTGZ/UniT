@@ -115,7 +115,7 @@ class Viewer4D {
         this.currentScene = 'scene1';
         this.abortController = null; // For cancelling pending requests
         this.sceneCache = {}; // Cache loaded scenes
-        this.userInteractedDuringLoad = false; // Track user interaction
+        this.userInteractedDuringLoad = false; // Track if user interacted during loading
         this.isLoading = false;
         
         // UI elements
@@ -124,6 +124,7 @@ class Viewer4D {
         this.frameCounter = document.getElementById('frame-counter');
         
         this.init();
+        this.initFloat16Table(); // Build lookup table for fast float16 conversion
         this.loadSplatFile('assets/scene1.splat', 'scene1');
         this.setupControls();
         this.animate();
@@ -132,6 +133,7 @@ class Viewer4D {
             if (this.isLoading) {
                 this.userInteractedDuringLoad = true;
             }
+            this.hideMessage();
         });
     }
     
@@ -179,10 +181,9 @@ class Viewer4D {
             return;
         }
         
-        // Start loading
+        this.showMessage('Loading 0%');
         this.isLoading = true;
         this.userInteractedDuringLoad = false;
-        this.showMessage('Loading 0%');
         
         try {
             const response = await fetch(url, { signal: this.abortController.signal });
@@ -197,7 +198,7 @@ class Viewer4D {
             const chunks = [];
             let received = 0;
             
-            // Stream download with progress display only
+            // Stream download with progress display only (no intermediate renders)
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
@@ -227,8 +228,8 @@ class Viewer4D {
                 count: this.splatData.count
             };
             
-            this.hideMessage();
             this.isLoading = false;
+            this.hideMessage();
             this.abortController = null;
             
         } catch (error) {
@@ -289,18 +290,26 @@ class Viewer4D {
         this.splatData = { positions, colors, count: pointCount };
     }
     
-    float16ToFloat32(h) {
-        const s = (h & 0x8000) >> 15;
-        const e = (h & 0x7C00) >> 10;
-        const f = h & 0x03FF;
-        
-        if (e === 0) {
-            return (s ? -1 : 1) * Math.pow(2, -14) * (f / Math.pow(2, 10));
-        } else if (e === 0x1F) {
-            return f ? NaN : ((s ? -1 : 1) * Infinity);
+    // Precomputed lookup table for float16 to float32 conversion (much faster)
+    initFloat16Table() {
+        if (this.float16Table) return;
+        this.float16Table = new Float32Array(65536);
+        for (let i = 0; i < 65536; i++) {
+            const s = (i & 0x8000) >> 15;
+            const e = (i & 0x7C00) >> 10;
+            const f = i & 0x03FF;
+            if (e === 0) {
+                this.float16Table[i] = (s ? -1 : 1) * (f / 1024) * (1 / 16384);
+            } else if (e === 31) {
+                this.float16Table[i] = f ? NaN : ((s ? -1 : 1) * Infinity);
+            } else {
+                this.float16Table[i] = (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024);
+            }
         }
-        
-        return (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / Math.pow(2, 10));
+    }
+    
+    float16ToFloat32(h) {
+        return this.float16Table[h];
     }
     
     createPointCloudFromSplat(resetCamera = true) {
