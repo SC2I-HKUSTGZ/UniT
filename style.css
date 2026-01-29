@@ -496,16 +496,20 @@ sup {
 
 /* Video Display */
 .video-display {
-    background-color: #fff;
+    background-color: #000;
     border-radius: 30px;
     border: 1px solid #e8eaed;
     overflow: hidden;
+    position: relative;
+    width: 100%;
 }
 
 .video-display video {
     width: 100%;
+    height: auto;
+    max-height: 500px;
     display: block;
-    border-radius: 30px;
+    object-fit: contain;
 }
 
 .video-thumbs .sample-img {
@@ -520,7 +524,7 @@ sup {
     }
     
     .video-display video {
-        border-radius: 20px;
+        max-height: 300px;
     }
     
     .video-thumbs .sample-img {
