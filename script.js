@@ -255,7 +255,7 @@ class Viewer4D {
         geometry.translate(-center.x, -center.y, -center.z);
         
         const material = new THREE.PointsMaterial({
-            size: 0.045,
+            size: 0.025,
             vertexColors: true,
             sizeAttenuation: true
         });
