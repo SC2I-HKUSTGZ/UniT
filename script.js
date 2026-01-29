@@ -1,11 +1,12 @@
 /* ========================================
    D4RT Style - JavaScript
    4D Point Cloud Viewer with Splat Loading
+   Performance Optimized Version
    ======================================== */
 
 document.addEventListener('DOMContentLoaded', () => {
     initNavigation();
-    initViewer();
+    initViewerLazy(); // Use lazy loading
     initSampleSelector();
     initVideoGallery();
 });
@@ -44,7 +45,6 @@ function initSampleSelector() {
         });
     });
     
-    // Only select sample images that have data-scene (3D viewer samples)
     const sampleImgs = document.querySelectorAll('.sample-img[data-scene]');
     sampleImgs.forEach(img => {
         img.addEventListener('click', () => {
@@ -68,24 +68,107 @@ function initVideoGallery() {
     
     videoThumbs.forEach(thumb => {
         thumb.addEventListener('click', () => {
-            // Update selected state
             videoThumbs.forEach(t => t.classList.remove('selected'));
             thumb.classList.add('selected');
             
-            // Switch video source
             const videoSrc = thumb.dataset.video;
             if (videoSrc) {
                 galleryVideo.src = videoSrc;
                 galleryVideo.load();
-                galleryVideo.play().catch(() => {}); // Auto-play if allowed
+                galleryVideo.play().catch(() => {});
             }
         });
     });
 }
 
 // ========================================
+// Lazy Loading with Intersection Observer
+// ========================================
+function initViewerLazy() {
+    const canvas = document.getElementById('canvas');
+    if (!canvas) return;
+    
+    const container = canvas.parentElement.parentElement; // visualization-container
+    
+    // Create observer for lazy loading
+    const observer = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (entry.isIntersecting && !window.viewer4D) {
+                // Initialize viewer when section comes into view
+                window.viewer4D = new Viewer4D('canvas');
+                observer.disconnect();
+            }
+        });
+    }, {
+        rootMargin: '200px' // Start loading 200px before visible
+    });
+    
+    observer.observe(container);
+    
+    // Also init immediately if already visible (fallback)
+    const rect = container.getBoundingClientRect();
+    if (rect.top < window.innerHeight + 200) {
+        window.viewer4D = new Viewer4D('canvas');
+        observer.disconnect();
+    }
+}
+
+// ========================================
+// Web Worker for Parsing (Inline Blob)
+// ========================================
+const parserWorkerCode = `
+    // Float16 lookup table
+    const float16Table = new Float32Array(65536);
+    for (let i = 0; i < 65536; i++) {
+        const s = (i & 0x8000) >> 15;
+        const e = (i & 0x7C00) >> 10;
+        const f = i & 0x03FF;
+        if (e === 0) {
+            float16Table[i] = (s ? -1 : 1) * (f / 1024) * (1 / 16384);
+        } else if (e === 31) {
+            float16Table[i] = f ? NaN : ((s ? -1 : 1) * Infinity);
+        } else {
+            float16Table[i] = (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024);
+        }
+    }
+    
+    self.onmessage = function(e) {
+        const buffer = e.data.buffer;
+        const view = new DataView(buffer);
+        let offset = 0;
+        
+        const pointCount = view.getUint32(offset, true);
+        offset = 4;
+        
+        const positions = new Float32Array(pointCount * 3);
+        const colors = new Float32Array(pointCount * 3);
+        
+        for (let i = 0; i < pointCount; i++) {
+            const x = float16Table[view.getUint16(offset, true)];
+            const y = float16Table[view.getUint16(offset + 2, true)];
+            const z = float16Table[view.getUint16(offset + 4, true)];
+            offset += 6;
+            
+            positions[i * 3] = x;
+            positions[i * 3 + 1] = -y; // Flip Y
+            positions[i * 3 + 2] = z;
+            
+            colors[i * 3] = view.getUint8(offset) / 255;
+            colors[i * 3 + 1] = view.getUint8(offset + 1) / 255;
+            colors[i * 3 + 2] = view.getUint8(offset + 2) / 255;
+            offset += 4;
+        }
+        
+        self.postMessage({
+            positions: positions,
+            colors: colors,
+            count: pointCount
+        }, [positions.buffer, colors.buffer]);
+    };
+`;
+
+// ========================================
 // 4D Point Cloud Viewer (Three.js)
-// Supports .splat file loading
 // ========================================
 class Viewer4D {
     constructor(canvasId) {
@@ -104,20 +187,22 @@ class Viewer4D {
         this.isPlaying = true;
         this.currentFrame = 0;
         this.totalFrames = 60;
-        this.lastFrameTime = 0;
-        this.frameInterval = 33;
         this.rotationAngle = 0;
         
         // Splat data
         this.splatData = null;
-        this.splatCenter = [0, 0, 0];
-        this.splatScale = 1;
         this.currentScene = 'scene1';
-        this.abortController = null; // For cancelling pending requests
-        this.sceneCache = {}; // Cache loaded scene data
-        this.pointCloudCache = {}; // Cache Three.js Points objects
-        this.userInteractedDuringLoad = false; // Track if user interacted during loading
+        this.abortController = null;
+        this.sceneCache = {};
+        this.pointCloudCache = {};
+        this.userInteractedDuringLoad = false;
         this.isLoading = false;
+        this.preloadQueue = [];
+        this.isPreloading = false;
+        
+        // Web Worker
+        this.parserWorker = null;
+        this.initWorker();
         
         // UI elements
         this.playPauseBtn = document.getElementById('play-pause');
@@ -125,7 +210,6 @@ class Viewer4D {
         this.frameCounter = document.getElementById('frame-counter');
         
         this.init();
-        this.initFloat16Table(); // Build lookup table for fast float16 conversion
         this.loadSplatFile('assets/scene1.splat', 'scene1');
         this.setupControls();
         this.animate();
@@ -136,6 +220,19 @@ class Viewer4D {
             }
             this.hideMessage();
         });
+        
+        // Start preloading other scenes after initial load
+        this.schedulePreload();
+    }
+    
+    initWorker() {
+        try {
+            const blob = new Blob([parserWorkerCode], { type: 'application/javascript' });
+            this.parserWorker = new Worker(URL.createObjectURL(blob));
+        } catch (e) {
+            console.warn('Web Worker not supported, using main thread parsing');
+            this.parserWorker = null;
+        }
     }
     
     init() {
@@ -150,11 +247,11 @@ class Viewer4D {
         
         this.renderer = new THREE.WebGLRenderer({ 
             canvas: this.canvas,
-            antialias: false,  // Disable for better performance
+            antialias: false,
             powerPreference: 'high-performance'
         });
         this.renderer.setSize(width, height);
-        this.renderer.setPixelRatio(1);  // Lower pixel ratio for performance
+        this.renderer.setPixelRatio(1);
         
         this.controls = new THREE.OrbitControls(this.camera, this.canvas);
         this.controls.enableDamping = true;
@@ -166,8 +263,129 @@ class Viewer4D {
         window.addEventListener('resize', () => this.onResize());
     }
     
+    // Schedule preloading of other scenes
+    schedulePreload() {
+        // Preload order: smaller files first
+        const preloadOrder = ['scene3', 'scene5', 'scene4', 'scene2'];
+        
+        const scheduleNext = () => {
+            if (preloadOrder.length === 0) return;
+            
+            const nextScene = preloadOrder.shift();
+            if (!this.sceneCache[nextScene] && !this.pointCloudCache[nextScene]) {
+                this.preloadScene(nextScene).then(() => {
+                    // Use requestIdleCallback for next preload
+                    if ('requestIdleCallback' in window) {
+                        requestIdleCallback(() => scheduleNext(), { timeout: 5000 });
+                    } else {
+                        setTimeout(scheduleNext, 1000);
+                    }
+                });
+            } else {
+                scheduleNext();
+            }
+        };
+        
+        // Start preloading after initial scene loads
+        setTimeout(() => {
+            if ('requestIdleCallback' in window) {
+                requestIdleCallback(() => scheduleNext(), { timeout: 3000 });
+            } else {
+                setTimeout(scheduleNext, 2000);
+            }
+        }, 1000);
+    }
+    
+    // Preload a scene in the background
+    async preloadScene(sceneName) {
+        if (this.sceneCache[sceneName] || this.isLoading) return;
+        
+        const sceneFiles = {
+            'scene1': 'assets/scene1.splat',
+            'scene2': 'assets/scene2.splat',
+            'scene3': 'assets/scene3.splat',
+            'scene4': 'assets/scene4.splat',
+            'scene5': 'assets/scene5.splat'
+        };
+        
+        const url = sceneFiles[sceneName];
+        if (!url) return;
+        
+        try {
+            const response = await fetch(url);
+            if (!response.ok) return;
+            
+            const buffer = await response.arrayBuffer();
+            const data = await this.parseWithWorker(buffer);
+            
+            this.sceneCache[sceneName] = data;
+            console.log(`Preloaded ${sceneName}`);
+        } catch (e) {
+            // Silent fail for preloading
+        }
+    }
+    
+    // Parse using Web Worker
+    parseWithWorker(buffer) {
+        return new Promise((resolve, reject) => {
+            if (!this.parserWorker) {
+                // Fallback to main thread
+                resolve(this.parseSplatDataSync(buffer));
+                return;
+            }
+            
+            const handler = (e) => {
+                this.parserWorker.removeEventListener('message', handler);
+                resolve(e.data);
+            };
+            
+            this.parserWorker.addEventListener('message', handler);
+            this.parserWorker.postMessage({ buffer }, [buffer]);
+        });
+    }
+    
+    // Synchronous parsing (fallback)
+    parseSplatDataSync(buffer) {
+        const view = new DataView(buffer);
+        let offset = 0;
+        
+        const pointCount = view.getUint32(offset, true);
+        offset = 4;
+        
+        const positions = new Float32Array(pointCount * 3);
+        const colors = new Float32Array(pointCount * 3);
+        
+        // Build float16 table inline
+        const float16Table = new Float32Array(65536);
+        for (let i = 0; i < 65536; i++) {
+            const s = (i & 0x8000) >> 15;
+            const e = (i & 0x7C00) >> 10;
+            const f = i & 0x03FF;
+            if (e === 0) {
+                float16Table[i] = (s ? -1 : 1) * (f / 1024) * (1 / 16384);
+            } else if (e === 31) {
+                float16Table[i] = f ? NaN : ((s ? -1 : 1) * Infinity);
+            } else {
+                float16Table[i] = (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024);
+            }
+        }
+        
+        for (let i = 0; i < pointCount; i++) {
+            positions[i * 3] = float16Table[view.getUint16(offset, true)];
+            positions[i * 3 + 1] = -float16Table[view.getUint16(offset + 2, true)];
+            positions[i * 3 + 2] = float16Table[view.getUint16(offset + 4, true)];
+            offset += 6;
+            
+            colors[i * 3] = view.getUint8(offset) / 255;
+            colors[i * 3 + 1] = view.getUint8(offset + 1) / 255;
+            colors[i * 3 + 2] = view.getUint8(offset + 2) / 255;
+            offset += 4;
+        }
+        
+        return { positions, colors, count: pointCount };
+    }
+    
     async loadSplatFile(url, sceneName = 'scene1') {
-        // Cancel any pending request
         if (this.abortController) {
             this.abortController.abort();
         }
@@ -177,14 +395,14 @@ class Viewer4D {
         
         // Check if Three.js object is cached - instant switch
         if (this.pointCloudCache[sceneName]) {
-            this.createPointCloudFromSplat(false); // Don't reset camera, use cached object
+            this.createPointCloudFromSplat(false);
             return;
         }
         
-        // Check if data is cached - need to recreate Three.js object
+        // Check if data is cached
         if (this.sceneCache[sceneName]) {
             this.splatData = this.sceneCache[sceneName];
-            this.createPointCloudFromSplat(false); // Don't reset camera
+            this.createPointCloudFromSplat(false);
             return;
         }
         
@@ -194,9 +412,7 @@ class Viewer4D {
         
         try {
             const response = await fetch(url, { signal: this.abortController.signal });
-            if (!response.ok) {
-                throw new Error('Failed to load splat file');
-            }
+            if (!response.ok) throw new Error('Failed to load');
             
             const contentLength = response.headers.get('content-length');
             const total = contentLength ? parseInt(contentLength, 10) : 0;
@@ -205,7 +421,6 @@ class Viewer4D {
             const chunks = [];
             let received = 0;
             
-            // Stream download with progress display only (no intermediate renders)
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
@@ -213,25 +428,32 @@ class Viewer4D {
                 chunks.push(value);
                 received += value.length;
                 
-                // Update progress (cap at 100%)
                 if (total > 0) {
                     const percent = Math.min(100, Math.round((received / total) * 100));
                     this.showMessage(`Loading ${percent}%`);
                 }
             }
             
-            // Parse and render once at the end
-            const buffer = this.concatArrayBuffers(chunks);
-            this.parseSplatData(buffer);
+            // Concat buffers
+            const totalLength = chunks.reduce((sum, arr) => sum + arr.length, 0);
+            const result = new Uint8Array(totalLength);
+            let offset = 0;
+            for (const arr of chunks) {
+                result.set(arr, offset);
+                offset += arr.length;
+            }
             
-            // Only reset camera if user didn't interact during loading
+            // Parse with Web Worker
+            this.splatData = await this.parseWithWorker(result.buffer);
+            console.log(`Loading ${this.splatData.count.toLocaleString()} points`);
+            
             const shouldResetCamera = !this.userInteractedDuringLoad;
             this.createPointCloudFromSplat(shouldResetCamera);
             
-            // Cache the loaded data (clone to preserve original)
+            // Cache data
             this.sceneCache[sceneName] = {
-                positions: this.splatData.positions.slice(),
-                colors: this.splatData.colors.slice(),
+                positions: this.splatData.positions,
+                colors: this.splatData.colors,
                 count: this.splatData.count
             };
             
@@ -241,103 +463,28 @@ class Viewer4D {
             
         } catch (error) {
             this.isLoading = false;
-            if (error.name === 'AbortError') {
-                return;
-            }
-            console.error('Error loading splat:', error);
+            if (error.name === 'AbortError') return;
+            console.error('Error loading:', error);
             this.createDemoScene();
             this.hideMessage();
         }
     }
     
-    concatArrayBuffers(arrays) {
-        const totalLength = arrays.reduce((sum, arr) => sum + arr.length, 0);
-        const result = new Uint8Array(totalLength);
-        let offset = 0;
-        for (const arr of arrays) {
-            result.set(arr, offset);
-            offset += arr.length;
-        }
-        return result.buffer;
-    }
-    
-    parseSplatData(buffer) {
-        const view = new DataView(buffer);
-        let offset = 0;
-        
-        // Read point count (first 4 bytes as uint32 little-endian)
-        const pointCount = view.getUint32(offset, true);
-        offset = 4;
-        
-        console.log(`Loading ${pointCount.toLocaleString()} points`);
-        
-        // Read point data: [x_f16, y_f16, z_f16, r_u8, g_u8, b_u8, a_u8] = 10 bytes per point
-        const positions = new Float32Array(pointCount * 3);
-        const colors = new Float32Array(pointCount * 3);
-        
-        for (let i = 0; i < pointCount; i++) {
-            // Read float16 positions and convert to float32
-            const x = this.float16ToFloat32(view.getUint16(offset, true));
-            const y = this.float16ToFloat32(view.getUint16(offset + 2, true));
-            const z = this.float16ToFloat32(view.getUint16(offset + 4, true));
-            offset += 6;
-            
-            // Positions are already normalized in [-10, 10] range, flip Y for correct orientation
-            positions[i * 3] = x;
-            positions[i * 3 + 1] = -y; // Flip Y
-            positions[i * 3 + 2] = z;
-            
-            // Read colors (RGBA, but we only use RGB)
-            colors[i * 3] = view.getUint8(offset) / 255;
-            colors[i * 3 + 1] = view.getUint8(offset + 1) / 255;
-            colors[i * 3 + 2] = view.getUint8(offset + 2) / 255;
-            offset += 4;
-        }
-        
-        this.splatData = { positions, colors, count: pointCount };
-    }
-    
-    // Precomputed lookup table for float16 to float32 conversion (much faster)
-    initFloat16Table() {
-        if (this.float16Table) return;
-        this.float16Table = new Float32Array(65536);
-        for (let i = 0; i < 65536; i++) {
-            const s = (i & 0x8000) >> 15;
-            const e = (i & 0x7C00) >> 10;
-            const f = i & 0x03FF;
-            if (e === 0) {
-                this.float16Table[i] = (s ? -1 : 1) * (f / 1024) * (1 / 16384);
-            } else if (e === 31) {
-                this.float16Table[i] = f ? NaN : ((s ? -1 : 1) * Infinity);
-            } else {
-                this.float16Table[i] = (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024);
-            }
-        }
-    }
-    
-    float16ToFloat32(h) {
-        return this.float16Table[h];
-    }
-    
     createPointCloudFromSplat(resetCamera = true) {
-        if (!this.splatData) return;
+        if (!this.splatData && !this.pointCloudCache[this.currentScene]) return;
         
-        // Remove current point cloud from scene
         if (this.pointCloud) {
             this.scene.remove(this.pointCloud);
         }
         
-        // Check if we have cached Three.js object for this scene
         if (this.pointCloudCache[this.currentScene]) {
             this.pointCloud = this.pointCloudCache[this.currentScene];
             this.scene.add(this.pointCloud);
         } else {
-            // Create new point cloud
             const geometry = new THREE.BufferGeometry();
             geometry.setAttribute('position', new THREE.BufferAttribute(this.splatData.positions, 3));
             geometry.setAttribute('color', new THREE.BufferAttribute(this.splatData.colors, 3));
             
-            // Center the point cloud
             geometry.computeBoundingBox();
             const center = new THREE.Vector3();
             geometry.boundingBox.getCenter(center);
@@ -351,17 +498,13 @@ class Viewer4D {
             
             this.pointCloud = new THREE.Points(geometry, material);
             this.scene.add(this.pointCloud);
-            
-            // Cache the Three.js object
             this.pointCloudCache[this.currentScene] = this.pointCloud;
         }
         
-        // Only reset camera for new scene loads
         if (resetCamera) {
             this.pointCloud.geometry.computeBoundingSphere();
             const radius = this.pointCloud.geometry.boundingSphere.radius;
             
-            // Scene-specific camera positions
             const cameraSettings = {
                 'scene1': { x: -0.4, y: 0.5, z: -1.7 },
                 'scene2': { x: -0.4, y: 0.5, z: -1.7 },
@@ -382,7 +525,6 @@ class Viewer4D {
     }
     
     createDemoScene() {
-        // Fallback demo scene if splat loading fails
         const pointCount = 50000;
         const positions = new Float32Array(pointCount * 3);
         const colors = new Float32Array(pointCount * 3);
@@ -432,31 +574,15 @@ class Viewer4D {
     
     setupControls() {
         if (this.playPauseBtn) {
-            this.playPauseBtn.addEventListener('click', () => {
-                this.togglePlayback();
-            });
+            this.playPauseBtn.addEventListener('click', () => this.togglePlayback());
         }
         
         if (this.frameSlider) {
             this.frameSlider.max = this.totalFrames - 1;
-            
             this.frameSlider.addEventListener('input', () => {
                 this.currentFrame = parseInt(this.frameSlider.value);
                 this.rotationAngle = (this.currentFrame / this.totalFrames) * Math.PI * 2;
                 this.updateUI();
-            });
-            
-            this.frameSlider.addEventListener('mousedown', () => {
-                this.wasPlaying = this.isPlaying;
-                this.isPlaying = false;
-                this.updatePlayPauseButton();
-            });
-            
-            this.frameSlider.addEventListener('mouseup', () => {
-                if (this.wasPlaying) {
-                    this.isPlaying = true;
-                    this.updatePlayPauseButton();
-                }
             });
         }
         
@@ -520,15 +646,7 @@ class Viewer4D {
     
     animate() {
         requestAnimationFrame(() => this.animate());
-        
-        // Static point cloud - no auto rotation
-        // User can freely rotate with mouse/touch controls
-        
         this.controls.update();
         this.renderer.render(this.scene, this.camera);
     }
-}
-
-function initViewer() {
-    window.viewer4D = new Viewer4D('canvas');
 }
