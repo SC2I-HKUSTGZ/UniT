@@ -158,29 +158,48 @@ class Viewer4D {
     }
     
     async loadSplatFile(url, sceneName = 'scene1') {
-        this.showMessage('Loading...');
+        this.showMessage('Loading 0%');
         this.currentScene = sceneName;
         
-        // Progressive loading: load low-res first, then full-res
-        const lowResUrl = url.replace('.splat', '_low.splat');
-        
         try {
-            // First load low-res version for quick display
-            const lowResResponse = await fetch(lowResUrl);
-            if (lowResResponse.ok) {
-                const lowBuffer = await lowResResponse.arrayBuffer();
-                this.parseSplatData(lowBuffer);
-                this.createPointCloudFromSplat();
-                this.showMessage('Loading HD...');
-            }
-            
-            // Then load full-res version
             const response = await fetch(url);
             if (!response.ok) {
                 throw new Error('Failed to load splat file');
             }
             
-            const buffer = await response.arrayBuffer();
+            const contentLength = response.headers.get('content-length');
+            const total = contentLength ? parseInt(contentLength, 10) : 0;
+            const reader = response.body.getReader();
+            
+            const chunks = [];
+            let received = 0;
+            let lastUpdate = 0;
+            
+            // Stream and progressively display
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                
+                chunks.push(value);
+                received += value.length;
+                
+                // Update progress
+                if (total > 0) {
+                    const percent = Math.round((received / total) * 100);
+                    this.showMessage(`Loading ${percent}%`);
+                }
+                
+                // Update display every 10% or 2MB
+                if (received - lastUpdate > Math.max(total * 0.1, 2000000)) {
+                    lastUpdate = received;
+                    const partialBuffer = this.concatArrayBuffers(chunks);
+                    this.parseSplatDataPartial(partialBuffer);
+                    this.createPointCloudFromSplat();
+                }
+            }
+            
+            // Final full render
+            const buffer = this.concatArrayBuffers(chunks);
             this.parseSplatData(buffer);
             this.createPointCloudFromSplat();
             this.hideMessage();
@@ -190,6 +209,49 @@ class Viewer4D {
             this.createDemoScene();
             this.hideMessage();
         }
+    }
+    
+    concatArrayBuffers(arrays) {
+        const totalLength = arrays.reduce((sum, arr) => sum + arr.length, 0);
+        const result = new Uint8Array(totalLength);
+        let offset = 0;
+        for (const arr of arrays) {
+            result.set(arr, offset);
+            offset += arr.length;
+        }
+        return result.buffer;
+    }
+    
+    parseSplatDataPartial(buffer) {
+        // Parse as much as we can from partial data
+        const view = new DataView(buffer);
+        if (buffer.byteLength < 4) return;
+        
+        const totalPoints = view.getUint32(0, true);
+        const bytesPerPoint = 10; // 6 bytes position + 4 bytes color
+        const availableBytes = buffer.byteLength - 4;
+        const availablePoints = Math.floor(availableBytes / bytesPerPoint);
+        const pointCount = Math.min(totalPoints, availablePoints);
+        
+        if (pointCount < 1000) return; // Wait for more data
+        
+        let offset = 4;
+        const positions = new Float32Array(pointCount * 3);
+        const colors = new Float32Array(pointCount * 3);
+        
+        for (let i = 0; i < pointCount; i++) {
+            positions[i * 3] = this.float16ToFloat32(view.getUint16(offset, true));
+            positions[i * 3 + 1] = this.float16ToFloat32(view.getUint16(offset + 2, true));
+            positions[i * 3 + 2] = this.float16ToFloat32(view.getUint16(offset + 4, true));
+            offset += 6;
+            
+            colors[i * 3] = view.getUint8(offset) / 255;
+            colors[i * 3 + 1] = view.getUint8(offset + 1) / 255;
+            colors[i * 3 + 2] = view.getUint8(offset + 2) / 255;
+            offset += 4;
+        }
+        
+        this.splatData = { positions, colors, count: pointCount };
     }
     
     parseSplatData(buffer) {
