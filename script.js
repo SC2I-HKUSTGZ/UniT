@@ -210,7 +210,8 @@ class Viewer4D {
         this.frameCounter = document.getElementById('frame-counter');
         
         this.init();
-        this.loadSplatFile('assets/scene1.splat', 'scene1');
+        // Load preview first for fast initial display, then full version
+        this.loadInitialScene();
         this.setupControls();
         this.animate();
         
@@ -220,9 +221,6 @@ class Viewer4D {
             }
             this.hideMessage();
         });
-        
-        // Start preloading other scenes after initial load
-        this.schedulePreload();
     }
     
     initWorker() {
@@ -261,6 +259,48 @@ class Viewer4D {
         this.controls.autoRotate = false;
         
         window.addEventListener('resize', () => this.onResize());
+    }
+    
+    // Load initial scene with preview-first strategy
+    async loadInitialScene() {
+        this.currentScene = 'scene1';
+        this.showMessage('Loading...');
+        this.isLoading = true;
+        
+        try {
+            // Step 1: Load preview (small file, fast)
+            const previewResponse = await fetch('assets/scene1_preview.splat');
+            if (previewResponse.ok) {
+                const previewBuffer = await previewResponse.arrayBuffer();
+                this.splatData = await this.parseWithWorker(previewBuffer);
+                this.createPointCloudFromSplat(true);
+                this.hideMessage();
+            }
+            
+            // Step 2: Load full version in background (don't show loading UI)
+            this.isLoading = false;
+            const fullResponse = await fetch('assets/scene1.splat');
+            if (fullResponse.ok) {
+                const fullBuffer = await fullResponse.arrayBuffer();
+                const fullData = await this.parseWithWorker(fullBuffer);
+                
+                // Replace with full version (preserve camera)
+                this.splatData = fullData;
+                this.sceneCache['scene1'] = fullData;
+                delete this.pointCloudCache['scene1']; // Clear old cache
+                this.createPointCloudFromSplat(false); // Keep camera position
+                console.log('Upgraded to full quality:', fullData.count.toLocaleString(), 'points');
+            }
+            
+            // Step 3: Start preloading other scenes
+            this.schedulePreload();
+            
+        } catch (error) {
+            console.error('Initial load error:', error);
+            this.isLoading = false;
+            this.hideMessage();
+            this.createDemoScene();
+        }
     }
     
     // Schedule preloading of other scenes
