@@ -114,8 +114,7 @@ class Viewer4D {
         this.splatScale = 1;
         this.currentScene = 'scene1';
         this.abortController = null; // For cancelling pending requests
-        this.sceneCache = {}; // Cache loaded scene data
-        this.pointCloudCache = {}; // Cache Three.js Points objects
+        this.sceneCache = {}; // Cache loaded scenes
         this.userInteractedDuringLoad = false; // Track if user interacted during loading
         this.isLoading = false;
         
@@ -175,13 +174,7 @@ class Viewer4D {
         
         this.currentScene = sceneName;
         
-        // Check if Three.js object is cached - instant switch
-        if (this.pointCloudCache[sceneName]) {
-            this.createPointCloudFromSplat(false); // Don't reset camera, use cached object
-            return;
-        }
-        
-        // Check if data is cached - need to recreate Three.js object
+        // Check cache first - instant display without camera reset
         if (this.sceneCache[sceneName]) {
             this.splatData = this.sceneCache[sceneName];
             this.createPointCloudFromSplat(false); // Don't reset camera
@@ -322,44 +315,36 @@ class Viewer4D {
     createPointCloudFromSplat(resetCamera = true) {
         if (!this.splatData) return;
         
-        // Remove current point cloud from scene
         if (this.pointCloud) {
             this.scene.remove(this.pointCloud);
+            this.pointCloud.geometry.dispose();
+            this.pointCloud.material.dispose();
         }
         
-        // Check if we have cached Three.js object for this scene
-        if (this.pointCloudCache[this.currentScene]) {
-            this.pointCloud = this.pointCloudCache[this.currentScene];
-            this.scene.add(this.pointCloud);
-        } else {
-            // Create new point cloud
-            const geometry = new THREE.BufferGeometry();
-            geometry.setAttribute('position', new THREE.BufferAttribute(this.splatData.positions, 3));
-            geometry.setAttribute('color', new THREE.BufferAttribute(this.splatData.colors, 3));
-            
-            // Center the point cloud
-            geometry.computeBoundingBox();
-            const center = new THREE.Vector3();
-            geometry.boundingBox.getCenter(center);
-            geometry.translate(-center.x, -center.y, -center.z);
-            
-            const material = new THREE.PointsMaterial({
-                size: 0.035,
-                vertexColors: true,
-                sizeAttenuation: true
-            });
-            
-            this.pointCloud = new THREE.Points(geometry, material);
-            this.scene.add(this.pointCloud);
-            
-            // Cache the Three.js object
-            this.pointCloudCache[this.currentScene] = this.pointCloud;
-        }
+        // Y is already flipped during parsing
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(this.splatData.positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(this.splatData.colors, 3));
+        
+        // Center the point cloud
+        geometry.computeBoundingBox();
+        const center = new THREE.Vector3();
+        geometry.boundingBox.getCenter(center);
+        geometry.translate(-center.x, -center.y, -center.z);
+        
+        const material = new THREE.PointsMaterial({
+            size: 0.035,
+            vertexColors: true,
+            sizeAttenuation: true
+        });
+        
+        this.pointCloud = new THREE.Points(geometry, material);
+        this.scene.add(this.pointCloud);
         
         // Only reset camera for new scene loads
         if (resetCamera) {
-            this.pointCloud.geometry.computeBoundingSphere();
-            const radius = this.pointCloud.geometry.boundingSphere.radius;
+            geometry.computeBoundingSphere();
+            const radius = geometry.boundingSphere.radius;
             
             // Scene-specific camera positions
             const cameraSettings = {
