@@ -4,8 +4,8 @@
    ======================================== */
 
 :root {
-    --btn-height: 38px;
-    --btn-gap: 6px;
+    --btn-height: 44px;
+    --btn-gap: 8px;
     --img-size: calc((var(--btn-height) * 2) + var(--btn-gap));
     --btn-height-mobile: 30px;
     --btn-gap-mobile: 4px;
@@ -22,9 +22,9 @@ body {
     font-family: 'Google Sans', Arial, sans-serif;
     line-height: 1.6;
     color: #333;
-    max-width: 960px;
+    max-width: 1200px;
     margin: 40px auto;
-    padding: 0 20px;
+    padding: 0 40px;
     background-color: #fff;
 }
 
@@ -44,12 +44,13 @@ h1, h2 {
 }
 
 h1 {
-    font-size: 2.5em;
-    margin-bottom: 0.5em;
+    font-size: 2.8em;
+    margin-bottom: 0.6em;
+    line-height: 1.2;
 }
 
 h2 {
-    font-size: 1.8em;
+    font-size: 1.9em;
     margin-top: 1.5em;
     margin-bottom: 1em;
 }
@@ -187,9 +188,9 @@ sup {
 /* Content Cards */
 .abstract, .citation, .visualization-container, .method, .capabilities, .acknowledgements {
     background-color: rgba(248, 249, 250, 1);
-    padding: 30px;
+    padding: 40px 50px;
     border-radius: 30px;
-    margin-bottom: 30px;
+    margin-bottom: 40px;
     border: 1px solid #e8eaed;
     transition: padding-bottom 0.1s ease-in-out;
 }
@@ -264,7 +265,7 @@ sup {
     border: 1px solid #e8eaed;
     background-color: #fff;
     position: relative;
-    height: 450px;
+    height: 550px;
     overflow: hidden;
 }
 
@@ -552,7 +553,7 @@ sup {
 .video-display video {
     width: 100%;
     height: auto;
-    max-height: 500px;
+    max-height: 600px;
     display: block;
     object-fit: contain;
 }
