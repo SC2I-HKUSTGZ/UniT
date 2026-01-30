@@ -316,17 +316,20 @@ sup {
 }
 
 .measure-hint {
+    display: none;
     text-align: center;
-    color: #666;
+    color: #333;
     font-size: 14px;
-    margin: 0 0 12px 0;
-    opacity: 0;
-    transition: opacity 0.3s ease;
+    padding: 8px 16px;
+    background: #f5f5f5;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    width: fit-content;
+    margin: 0 auto 12px auto;
 }
 
 .measure-hint.visible {
-    opacity: 1;
-    text-align: center;
+    display: block;
 }
 
 #canvas {
