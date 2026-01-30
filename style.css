@@ -313,6 +313,19 @@ sup {
 .measure-button.active {
     background: #4285f4;
     color: white;
+}
+
+.measure-hint {
+    text-align: center;
+    color: #666;
+    font-size: 14px;
+    margin: 0 0 12px 0;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+.measure-hint.visible {
+    opacity: 1;
     text-align: center;
 }
 

@@ -163,17 +163,21 @@ class Viewer4D {
     toggleMeasureMode() {
         this.measureMode = !this.measureMode;
         const btn = document.getElementById('measure-btn');
+        const hint = document.getElementById('measure-hint');
+        
         if (btn) {
             btn.classList.toggle('active', this.measureMode);
             btn.title = this.measureMode ? 'Click to disable measurement' : 'Click two points to measure distance';
         }
         
+        // Show/hide hint text (outside viewer, like MapAnything)
+        if (hint) {
+            hint.classList.toggle('visible', this.measureMode);
+        }
+        
         // Clear previous measurements when toggling off
         if (!this.measureMode) {
             this.clearMeasurement();
-        } else {
-            this.showMessage('Click two points to measure distance');
-            setTimeout(() => this.hideMessage(), 2000);
         }
         
         // Change cursor
@@ -245,8 +249,11 @@ class Viewer4D {
         const p2 = this.measurePoints[1];
         const distance = p1.distanceTo(p2);
         
-        // Show distance in message area (meters, like MapAnything)
-        this.showMessage(`Distance: ${distance.toFixed(2)} m`);
+        // Show distance in hint area (outside viewer, like MapAnything)
+        const hint = document.getElementById('measure-hint');
+        if (hint) {
+            hint.textContent = `Distance: ${distance.toFixed(2)} m`;
+        }
         
         // Create/update distance label in scene
         this.updateDistanceLabel(distance);
@@ -320,7 +327,12 @@ class Viewer4D {
         }
         
         this.measurePoints = [];
-        this.hideMessage();
+        
+        // Reset hint text
+        const hint = document.getElementById('measure-hint');
+        if (hint) {
+            hint.textContent = 'Click two points to measure distance';
+        }
     }
     
     init() {
