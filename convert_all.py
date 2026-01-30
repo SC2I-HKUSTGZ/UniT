@@ -75,13 +75,13 @@ def convert_to_splat(vertices, output_path, sample_ratio=0.6):
         vertices = vertices[indices]
         print(f"  Downsampled to {target_points:,} points ({sample_ratio*100:.0f}%)")
     
-    # Normalize positions to reasonable range
+    # Keep original scale, only center the point cloud
     positions = vertices[:, :3]
     center = np.mean(positions, axis=0)
-    positions = positions - center
+    positions = positions - center  # Center only, no scaling
+    
     max_extent = np.max(np.abs(positions))
-    if max_extent > 0:
-        positions = positions / max_extent * 10  # Scale to [-10, 10]
+    print(f"  Max extent from center: {max_extent:.3f} (original units preserved)")
     
     # Write binary splat format: [x_f16, y_f16, z_f16, r_u8, g_u8, b_u8, a_u8] = 10 bytes per point
     with open(output_path, 'wb') as f:
