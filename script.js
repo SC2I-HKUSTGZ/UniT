@@ -364,6 +364,9 @@ class Viewer4D {
     }
     
     async loadSplatFile(url, sceneName = 'scene1') {
+        // Clear measurement when switching scenes
+        this.clearMeasurement();
+        
         // Cancel any pending request
         if (this.abortController) {
             this.abortController.abort();
