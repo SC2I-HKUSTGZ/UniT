@@ -183,7 +183,6 @@ class Viewer4D {
     onCanvasClick(event) {
         if (!this.measureMode || !this.pointCloud) return;
         
-        // Prevent orbit controls from interfering
         const rect = this.canvas.getBoundingClientRect();
         this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -246,8 +245,8 @@ class Viewer4D {
         const p2 = this.measurePoints[1];
         const distance = p1.distanceTo(p2);
         
-        // Show distance in message area
-        this.showMessage(`Distance: ${distance.toFixed(3)} units`);
+        // Show distance in message area (meters, like MapAnything)
+        this.showMessage(`Distance: ${distance.toFixed(2)} m`);
         
         // Create/update distance label in scene
         this.updateDistanceLabel(distance);
@@ -270,10 +269,10 @@ class Viewer4D {
         ctx.fill();
         
         ctx.fillStyle = '#ffffff';
-        ctx.font = 'bold 24px Arial';
+        ctx.font = 'bold 28px Arial';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(`${distance.toFixed(3)} units`, canvas.width / 2, canvas.height / 2);
+        ctx.fillText(`${distance.toFixed(2)} m`, canvas.width / 2, canvas.height / 2);
         
         const texture = new THREE.CanvasTexture(canvas);
         const spriteMat = new THREE.SpriteMaterial({ 
