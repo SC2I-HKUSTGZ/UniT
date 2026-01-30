@@ -118,6 +118,16 @@ class Viewer4D {
         this.userInteractedDuringLoad = false; // Track if user interacted during loading
         this.isLoading = false;
         
+        // Measurement mode
+        this.measureMode = false;
+        this.measurePoints = [];
+        this.measureMarkers = [];
+        this.measureLine = null;
+        this.measureLabel = null;
+        this.raycaster = new THREE.Raycaster();
+        this.raycaster.params.Points.threshold = 0.1;
+        this.mouse = new THREE.Vector2();
+        
         // UI elements
         this.playPauseBtn = document.getElementById('play-pause');
         this.frameSlider = document.getElementById('frame-slider');
@@ -135,6 +145,183 @@ class Viewer4D {
             }
             this.hideMessage();
         });
+        
+        // Setup measurement click handler
+        this.canvas.addEventListener('click', (e) => this.onCanvasClick(e));
+        this.initMeasureButton();
+    }
+    
+    initMeasureButton() {
+        const btn = document.getElementById('measure-btn');
+        if (btn) {
+            btn.addEventListener('click', () => {
+                this.toggleMeasureMode();
+            });
+        }
+    }
+    
+    toggleMeasureMode() {
+        this.measureMode = !this.measureMode;
+        const btn = document.getElementById('measure-btn');
+        if (btn) {
+            btn.classList.toggle('active', this.measureMode);
+            btn.title = this.measureMode ? 'Click to disable measurement' : 'Click two points to measure distance';
+        }
+        
+        // Clear previous measurements when toggling off
+        if (!this.measureMode) {
+            this.clearMeasurement();
+        } else {
+            this.showMessage('Click two points to measure distance');
+            setTimeout(() => this.hideMessage(), 2000);
+        }
+        
+        // Change cursor
+        this.canvas.style.cursor = this.measureMode ? 'crosshair' : 'grab';
+    }
+    
+    onCanvasClick(event) {
+        if (!this.measureMode || !this.pointCloud) return;
+        
+        // Prevent orbit controls from interfering
+        const rect = this.canvas.getBoundingClientRect();
+        this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+        this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+        
+        this.raycaster.setFromCamera(this.mouse, this.camera);
+        const intersects = this.raycaster.intersectObject(this.pointCloud);
+        
+        if (intersects.length > 0) {
+            const point = intersects[0].point.clone();
+            this.addMeasurePoint(point);
+        }
+    }
+    
+    addMeasurePoint(point) {
+        // If we already have 2 points, start fresh
+        if (this.measurePoints.length >= 2) {
+            this.clearMeasurement();
+        }
+        
+        this.measurePoints.push(point);
+        
+        // Create marker sphere
+        const markerGeom = new THREE.SphereGeometry(0.05, 16, 16);
+        const markerMat = new THREE.MeshBasicMaterial({ 
+            color: this.measurePoints.length === 1 ? 0x00ff00 : 0xff0000 
+        });
+        const marker = new THREE.Mesh(markerGeom, markerMat);
+        marker.position.copy(point);
+        this.scene.add(marker);
+        this.measureMarkers.push(marker);
+        
+        // If we have 2 points, draw line and show distance
+        if (this.measurePoints.length === 2) {
+            this.drawMeasureLine();
+            this.showDistance();
+        }
+    }
+    
+    drawMeasureLine() {
+        if (this.measureLine) {
+            this.scene.remove(this.measureLine);
+            this.measureLine.geometry.dispose();
+            this.measureLine.material.dispose();
+        }
+        
+        const points = this.measurePoints;
+        const geometry = new THREE.BufferGeometry().setFromPoints(points);
+        const material = new THREE.LineBasicMaterial({ 
+            color: 0xffff00, 
+            linewidth: 2,
+            depthTest: false
+        });
+        this.measureLine = new THREE.Line(geometry, material);
+        this.measureLine.renderOrder = 999;
+        this.scene.add(this.measureLine);
+    }
+    
+    showDistance() {
+        const p1 = this.measurePoints[0];
+        const p2 = this.measurePoints[1];
+        const distance = p1.distanceTo(p2);
+        
+        // Show distance in message area
+        this.showMessage(`Distance: ${distance.toFixed(3)} units`);
+        
+        // Create/update distance label in scene
+        this.updateDistanceLabel(distance);
+    }
+    
+    updateDistanceLabel(distance) {
+        // Remove old label
+        if (this.measureLabel) {
+            this.scene.remove(this.measureLabel);
+        }
+        
+        // Create canvas for text
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = 256;
+        canvas.height = 64;
+        
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+        ctx.roundRect(0, 0, canvas.width, canvas.height, 8);
+        ctx.fill();
+        
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 24px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`${distance.toFixed(3)} units`, canvas.width / 2, canvas.height / 2);
+        
+        const texture = new THREE.CanvasTexture(canvas);
+        const spriteMat = new THREE.SpriteMaterial({ 
+            map: texture,
+            depthTest: false
+        });
+        this.measureLabel = new THREE.Sprite(spriteMat);
+        
+        // Position label at midpoint
+        const midpoint = new THREE.Vector3().addVectors(
+            this.measurePoints[0], 
+            this.measurePoints[1]
+        ).multiplyScalar(0.5);
+        midpoint.y += 0.3; // Offset above the line
+        
+        this.measureLabel.position.copy(midpoint);
+        this.measureLabel.scale.set(1, 0.25, 1);
+        this.measureLabel.renderOrder = 1000;
+        this.scene.add(this.measureLabel);
+    }
+    
+    clearMeasurement() {
+        // Remove markers
+        this.measureMarkers.forEach(m => {
+            this.scene.remove(m);
+            m.geometry.dispose();
+            m.material.dispose();
+        });
+        this.measureMarkers = [];
+        
+        // Remove line
+        if (this.measureLine) {
+            this.scene.remove(this.measureLine);
+            this.measureLine.geometry.dispose();
+            this.measureLine.material.dispose();
+            this.measureLine = null;
+        }
+        
+        // Remove label
+        if (this.measureLabel) {
+            this.scene.remove(this.measureLabel);
+            this.measureLabel.material.map.dispose();
+            this.measureLabel.material.dispose();
+            this.measureLabel = null;
+        }
+        
+        this.measurePoints = [];
+        this.hideMessage();
     }
     
     init() {
