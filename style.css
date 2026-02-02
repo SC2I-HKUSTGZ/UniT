@@ -612,43 +612,6 @@ sup {
     z-index: 2;
 }
 
-.hf-placeholder {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 600px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: linear-gradient(135deg, #fff5e6 0%, #ffe4cc 100%);
-    border-radius: 16px;
-    z-index: 1;
-}
-
-.hf-placeholder-content {
-    text-align: center;
-    color: #666;
-}
-
-.hf-icon {
-    font-size: 64px;
-    display: block;
-    margin-bottom: 15px;
-}
-
-.hf-placeholder-content p {
-    margin: 5px 0;
-    font-size: 1.1em;
-    font-weight: 500;
-}
-
-.hf-coming-soon {
-    color: #999;
-    font-weight: 400 !important;
-    font-size: 0.95em !important;
-}
-
 .demo-link {
     text-align: center;
     margin-top: 15px;
