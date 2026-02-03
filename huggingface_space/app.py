@@ -34,6 +34,28 @@ def create_pointcloud_figure(points, colors):
     return fig
 
 
+def create_placeholder_figure():
+    """Create a placeholder figure when no image is uploaded."""
+    fig = go.Figure()
+    fig.add_annotation(
+        text="📷 Upload an image and click Generate<br>to create 3D point cloud",
+        xref="paper", yref="paper",
+        x=0.5, y=0.5,
+        showarrow=False,
+        font=dict(size=16, color="#666"),
+        align="center"
+    )
+    fig.update_layout(
+        xaxis=dict(visible=False),
+        yaxis=dict(visible=False),
+        plot_bgcolor='#f5f7fa',
+        paper_bgcolor='#f5f7fa',
+        height=500,
+        margin=dict(l=0, r=0, t=0, b=0)
+    )
+    return fig
+
+
 def generate_demo_pointcloud(image):
     """Generate a demo point cloud from image (placeholder)."""
     img_array = np.array(image)
@@ -72,54 +94,61 @@ def generate_demo_pointcloud(image):
     return points, color_strings
 
 
-# Initial placeholder HTML
-PLACEHOLDER_HTML = """
-<div style="height: 450px; display: flex; align-items: center; justify-content: center; 
-            background: linear-gradient(135deg, #f5f7fa 0%, #e4e8eb 100%); 
-            border-radius: 12px; color: #666; font-size: 16px; text-align: center;">
-    <div>
-        <div style="font-size: 48px; margin-bottom: 16px;">📷</div>
-        <div>Upload an image and click Submit<br>to generate 3D point cloud</div>
-    </div>
-</div>
-"""
-
-
 def process_image(image):
-    """Process image and return point cloud visualization as HTML."""
+    """Process image and return point cloud visualization as Plotly figure."""
     if image is None:
-        return PLACEHOLDER_HTML
+        return create_placeholder_figure()
     
     try:
         points, colors = generate_demo_pointcloud(image)
         fig = create_pointcloud_figure(points, colors)
-        return fig.to_html(full_html=False, include_plotlyjs='cdn')
+        return fig
     except Exception as e:
-        return f"""
-        <div style="height: 450px; display: flex; align-items: center; justify-content: center; 
-                    background: #fff0f0; border-radius: 12px; color: #c00; font-size: 16px;">
-            Error processing image: {str(e)}
-        </div>
-        """
+        # Return error as a figure
+        fig = go.Figure()
+        fig.add_annotation(
+            text=f"Error: {str(e)}",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5,
+            showarrow=False,
+            font=dict(size=14, color="#c00"),
+            align="center"
+        )
+        fig.update_layout(
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+            plot_bgcolor='#fff0f0',
+            paper_bgcolor='#fff0f0',
+            height=500,
+            margin=dict(l=0, r=0, t=0, b=0)
+        )
+        return fig
 
 
-# Use simple gr.Interface
-demo = gr.Interface(
-    fn=process_image,
-    inputs=gr.Image(type="pil", label="Upload Image"),
-    outputs=gr.HTML(label="3D Point Cloud (drag to rotate, scroll to zoom)", value=PLACEHOLDER_HTML),
-    title="🎯 UniT: Unified Geometry Learner",
-    description="""
-Upload an image to generate a 3D point cloud reconstruction.
-
-> ⚠️ **Note**: This is a demo with placeholder outputs. The actual model will be integrated soon.
-
-**Links**: [Project Page](https://sc2i-hkustgz.github.io/UniT/) | Paper | Code
-""",
-    allow_flagging="never",
-    submit_btn="🚀 Generate 3D",
-    clear_btn="🗑️ Clear"
-)
+# Use gr.Blocks for more control over the interface
+with gr.Blocks(title="UniT: Unified Geometry Learner", theme=gr.themes.Soft()) as demo:
+    gr.Markdown("""
+    # 🎯 UniT: Unified Geometry Learner
+    
+    Upload an image to generate a 3D point cloud reconstruction.
+    
+    > ⚠️ **Note**: This is a demo with placeholder outputs. The actual model will be integrated soon.
+    
+    **Links**: [Project Page](https://sc2i-hkustgz.github.io/UniT/) | Paper | Code
+    """)
+    
+    with gr.Row():
+        with gr.Column(scale=1):
+            input_image = gr.Image(type="pil", label="Upload Image")
+            with gr.Row():
+                clear_btn = gr.ClearButton([input_image], value="🗑️ Clear")
+                submit_btn = gr.Button("🚀 Generate 3D", variant="primary")
+        
+        with gr.Column(scale=2):
+            output_plot = gr.Plot(label="3D Point Cloud (drag to rotate, scroll to zoom)", value=create_placeholder_figure())
+    
+    submit_btn.click(fn=process_image, inputs=input_image, outputs=output_plot)
+    input_image.clear(fn=lambda: create_placeholder_figure(), outputs=output_plot)
 
 if __name__ == "__main__":
     demo.launch()
