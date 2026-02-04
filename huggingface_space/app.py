@@ -40,7 +40,7 @@ def generate_demo_pointcloud(image):
     h, w = img_array.shape[:2]
     
     # Sample points from image
-    num_points = min(25000, h * w)
+    num_points = min(20000, h * w)
     indices = np.random.choice(h * w, num_points, replace=False)
     ys, xs = np.unravel_index(indices, (h, w))
     
@@ -58,7 +58,7 @@ def generate_demo_pointcloud(image):
     
     points = np.zeros((num_points, 3))
     points[:, 0] = (xs - cx) / fx * depths
-    points[:, 1] = (ys - cy) / fy * depths
+    points[:, 1] = -(ys - cy) / fy * depths  # Flip Y
     points[:, 2] = depths
     
     # Get colors
@@ -72,68 +72,73 @@ def generate_demo_pointcloud(image):
     return points, color_strings
 
 
+PLACEHOLDER_HTML = """
+<div style="height: 500px; display: flex; align-items: center; justify-content: center; 
+            background: linear-gradient(135deg, #f5f7fa 0%, #e4e8eb 100%); 
+            border-radius: 12px; color: #666; font-size: 16px; text-align: center;">
+    <div>
+        <div style="font-size: 48px; margin-bottom: 16px;">📷</div>
+        <div>Upload an image and click Submit<br>to generate interactive 3D point cloud</div>
+    </div>
+</div>
+"""
+
+
 def process_image(image):
-    """Process image and return point cloud visualization as Plotly figure."""
+    """Process image and return interactive Plotly visualization as HTML."""
     if image is None:
-        # Return empty figure with message
-        fig = go.Figure()
-        fig.add_annotation(
-            text="Upload an image to generate 3D point cloud",
-            xref="paper", yref="paper",
-            x=0.5, y=0.5,
-            showarrow=False,
-            font=dict(size=16, color="#666"),
-            align="center"
-        )
-        fig.update_layout(
-            xaxis=dict(visible=False),
-            yaxis=dict(visible=False),
-            plot_bgcolor='#f5f7fa',
-            paper_bgcolor='#f5f7fa',
-            height=500
-        )
-        return fig
+        return PLACEHOLDER_HTML
     
     try:
         points, colors = generate_demo_pointcloud(image)
         fig = create_pointcloud_figure(points, colors)
-        return fig
+        # Return interactive HTML with Plotly.js included
+        html = fig.to_html(full_html=False, include_plotlyjs='cdn', config={
+            'displayModeBar': True,
+            'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
+            'displaylogo': False
+        })
+        return f'<div style="border-radius: 12px; overflow: hidden;">{html}</div>'
     except Exception as e:
-        # Return error as a figure
-        fig = go.Figure()
-        fig.add_annotation(
-            text=f"Error: {str(e)}",
-            xref="paper", yref="paper",
-            x=0.5, y=0.5,
-            showarrow=False,
-            font=dict(size=14, color="#c00"),
-            align="center"
-        )
-        fig.update_layout(
-            xaxis=dict(visible=False),
-            yaxis=dict(visible=False),
-            plot_bgcolor='#fff0f0',
-            paper_bgcolor='#fff0f0',
-            height=500
-        )
-        return fig
+        return f"""
+        <div style="height: 500px; display: flex; align-items: center; justify-content: center; 
+                    background: #fff0f0; border-radius: 12px; color: #c00; font-size: 16px;">
+            Error: {str(e)}
+        </div>
+        """
 
 
-# Simple gr.Interface - most stable across versions
-demo = gr.Interface(
-    fn=process_image,
-    inputs=gr.Image(type="pil", label="Upload Image"),
-    outputs=gr.Plot(label="3D Point Cloud (drag to rotate, scroll to zoom)"),
-    title="UniT: Unified Geometry Learner",
-    description="""
-Upload an image to generate a 3D point cloud reconstruction.
-
-> **Note**: This is a demo with placeholder outputs. The actual model will be integrated soon.
-
-**Links**: [Project Page](https://sc2i-hkustgz.github.io/UniT/) | Paper | Code
-""",
-    allow_flagging="never"
-)
+# Use gr.Blocks for better control
+with gr.Blocks(title="UniT: Unified Geometry Learner", theme=gr.themes.Soft()) as demo:
+    gr.Markdown("""
+    # 🎯 UniT: Unified Geometry Learner
+    
+    Upload an image to generate an interactive 3D point cloud reconstruction.
+    
+    > **Note**: This is a demo with placeholder outputs. The actual model will be integrated soon.
+    
+    **Links**: [Project Page](https://sc2i-hkustgz.github.io/UniT/) | Paper | Code
+    """)
+    
+    with gr.Row():
+        with gr.Column(scale=1):
+            input_image = gr.Image(type="pil", label="Upload Image")
+            with gr.Row():
+                clear_btn = gr.Button("🗑️ Clear", variant="secondary")
+                submit_btn = gr.Button("🚀 Generate 3D", variant="primary")
+        
+        with gr.Column(scale=2):
+            output_html = gr.HTML(value=PLACEHOLDER_HTML, label="3D Point Cloud")
+    
+    gr.Markdown("""
+    **Tips**: Drag to rotate, scroll to zoom, right-click drag to pan.
+    """)
+    
+    def clear_all():
+        return None, PLACEHOLDER_HTML
+    
+    submit_btn.click(fn=process_image, inputs=input_image, outputs=output_html)
+    clear_btn.click(fn=clear_all, outputs=[input_image, output_html])
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=7860)
