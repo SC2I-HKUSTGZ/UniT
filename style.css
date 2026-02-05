@@ -89,7 +89,9 @@ sup {
 }
 
 .links a {
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
     margin: 0 10px;
     padding: 10px 20px;
     background-color: #1a73e8;
@@ -99,6 +101,10 @@ sup {
     transition: background-color 0.3s, box-shadow 0.3s;
     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     font-weight: 500;
+}
+
+.links a svg {
+    flex-shrink: 0;
 }
 
 .links a:hover {

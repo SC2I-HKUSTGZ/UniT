@@ -9,24 +9,28 @@ python_version: 3.11
 app_file: app.py
 pinned: false
 license: apache-2.0
-short_description: 3D reconstruction from images using UniT
+short_description: 3D reconstruction from images and videos using UniT
 ---
 
 # UniT: Group Autoregressive Transformer As Unified Geometry Learner
 
-This space demonstrates the UniT model for unified 3D geometry learning.
+Transform images and videos into interactive 3D point clouds.
 
 ## Features
 
-- **Single Image Reconstruction**: Upload a single image to generate a 3D point cloud
-- **Multi-View Reconstruction**: Upload multiple images for denser 3D reconstruction
+- **Video Reconstruction**: Upload a video to extract frames and generate 3D model
+- **Multi-Image Reconstruction**: Upload multiple images for 3D reconstruction  
+- **Interactive 3D Viewer**: Rotate, zoom, and pan the GLB model
+- **Adjustable Parameters**: Confidence threshold and camera visualization
+- **Download Results**: Export as PLY file for further processing
 
 ## Usage
 
-1. Select the tab for your use case (Single Image or Multi-View)
-2. Upload your image(s)
-3. Click "Reconstruct" to generate the 3D point cloud
-4. Interact with the 3D visualization (rotate, zoom, pan)
+1. Upload a video or multiple images
+2. Set frame/image sampling interval (optional)
+3. Click "Reconstruct" to generate 3D model
+4. Interact with the 3D visualization
+5. Download PLY file if needed
 
 ## Links
 
