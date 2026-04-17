@@ -1,13 +1,11 @@
 /* ========================================
-   D4RT Style - JavaScript
-   4D Point Cloud Viewer with Splat Loading
+   UniT project page — interactive examples
+   Chapter nav + PLY point-cloud viewer + video+cover sync
    ======================================== */
 
 document.addEventListener('DOMContentLoaded', () => {
     initNavigation();
-    initViewer();
-    initSampleSelector();
-    initVideoGallery();
+    initDemo();
 });
 
 // ========================================
@@ -19,702 +17,371 @@ function initNavigation() {
         btn.addEventListener('click', () => {
             chapterBtns.forEach(b => b.classList.remove('selected'));
             btn.classList.add('selected');
-            
             const sectionId = btn.dataset.section;
-            const targetSection = document.getElementById(sectionId);
-            if (targetSection) {
-                targetSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            }
+            const target = document.getElementById(sectionId);
+            if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
         });
     });
 }
 
 // ========================================
-// Sample Selector (3D Viewer)
+// Per-demo configuration
+// pointSize tuned to the density / extent of each cloud.
+// flipY=true matches trimesh's export of the UniT outputs.
+// camera is the (unit) offset from bbox center, scaled by bounding sphere radius.
 // ========================================
-function initSampleSelector() {
-    const modeBtns = document.querySelectorAll('.sample-type-button');
-    modeBtns.forEach(btn => {
-        btn.addEventListener('click', () => {
-            modeBtns.forEach(b => b.classList.remove('selected'));
-            btn.classList.add('selected');
-            if (window.viewer4D) {
-                window.viewer4D.switchMode(btn.dataset.mode);
-            }
+const DEMO_CONFIGS = {
+    hkust_intr: {
+        title: 'HKUST INTR',
+        ply: 'assets/demos/hkust_intr/scene.ply',
+        video: 'assets/demos/hkust_intr/reconstructed.mp4',
+        pointSize: 0.05,
+        flipY: true,
+        camera: { x: -0.6, y: 0.3, z: -1.4 }
+    },
+    hkust_toy: {
+        title: 'HKUST Toy',
+        ply: 'assets/demos/hkust_toy/scene.ply',
+        video: 'assets/demos/hkust_toy/reconstructed.mp4',
+        pointSize: 0.012,
+        flipY: true,
+        camera: { x: -0.4, y: 0.2, z: -1.5 }
+    },
+    hkust_redbird: {
+        title: 'HKUST Red Bird',
+        ply: 'assets/demos/hkust_redbird/scene.ply',
+        video: 'assets/demos/hkust_redbird/reconstructed.mp4',
+        pointSize: 0.14,
+        flipY: true,
+        camera: { x: -0.5, y: 0.35, z: -1.6 }
+    },
+    drift: {
+        title: 'Drift',
+        ply: 'assets/demos/drift/scene.ply',
+        video: 'assets/demos/drift/reconstructed.mp4',
+        pointSize: 0.3,
+        flipY: true,
+        camera: { x: -0.5, y: 0.25, z: -1.2 }
+    },
+    gta_sfm: {
+        title: 'GTA SfM',
+        ply: 'assets/demos/gta_sfm/scene.ply',
+        video: 'assets/demos/gta_sfm/reconstructed.mp4',
+        pointSize: 0.25,
+        flipY: true,
+        camera: { x: -0.4, y: 0.2, z: -1.4 }
+    },
+    kitti: {
+        title: 'KITTI',
+        ply: 'assets/demos/kitti/scene.ply',
+        video: 'assets/demos/kitti/reconstructed.mp4',
+        pointSize: 0.9,
+        flipY: true,
+        camera: { x: -0.3, y: 0.25, z: -0.9 }
+    }
+};
+
+// ========================================
+// Interactive Examples
+// ========================================
+function initDemo() {
+    const canvas = document.getElementById('demo-canvas');
+    if (!canvas) return;
+
+    const viewer = new PlyViewer(canvas, document.getElementById('demo-message'));
+    const video = document.getElementById('demo-video');
+    const cover = document.getElementById('demo-cover');
+    const coverImg = document.getElementById('demo-cover-img');
+    const thumbs = document.querySelectorAll('.demo-thumb');
+
+    let currentDemo = null;
+
+    function showCoverFor(key) {
+        const cfg = DEMO_CONFIGS[key];
+        if (!cfg) return;
+        coverImg.src = `assets/demos/${key}/cover.jpg`;
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+        cover.classList.remove('hidden');
+    }
+
+    function activate(key) {
+        currentDemo = key;
+        thumbs.forEach(t => t.classList.toggle('selected', t.dataset.demo === key));
+        showCoverFor(key);
+    }
+
+    function playDemo() {
+        if (!currentDemo) return;
+        const cfg = DEMO_CONFIGS[currentDemo];
+        cover.classList.add('hidden');
+        video.src = cfg.video;
+        video.load();
+        video.play().catch(() => { /* autoplay blocked — user already clicked, should be fine */ });
+        viewer.loadPly(cfg);
+    }
+
+    // Thumbnail click: switch preview + reset viewer
+    thumbs.forEach(t => {
+        t.addEventListener('click', () => {
+            const key = t.dataset.demo;
+            if (key === currentDemo) return;
+            activate(key);
+            viewer.clear();
         });
     });
-    
-    // Only select sample images that have data-scene (3D viewer samples)
-    const sampleImgs = document.querySelectorAll('.sample-img[data-scene]');
-    sampleImgs.forEach(img => {
-        img.addEventListener('click', () => {
-            sampleImgs.forEach(i => i.classList.remove('selected'));
-            img.classList.add('selected');
-            if (window.viewer4D) {
-                window.viewer4D.loadScene(img.dataset.scene);
-            }
-        });
-    });
+
+    // Cover click: play video + load point cloud
+    cover.addEventListener('click', playDemo);
+
+    // Default selection
+    activate('hkust_intr');
 }
 
 // ========================================
-// Video Gallery
+// PLY point cloud viewer (THREE.js PLYLoader)
 // ========================================
-function initVideoGallery() {
-    const videoThumbs = document.querySelectorAll('.video-thumbs .sample-img');
-    const galleryVideo = document.getElementById('gallery-video');
-    
-    if (!galleryVideo || videoThumbs.length === 0) return;
-    
-    videoThumbs.forEach(thumb => {
-        thumb.addEventListener('click', () => {
-            // Update selected state
-            videoThumbs.forEach(t => t.classList.remove('selected'));
-            thumb.classList.add('selected');
-            
-            // Switch video source
-            const videoSrc = thumb.dataset.video;
-            if (videoSrc) {
-                galleryVideo.src = videoSrc;
-                galleryVideo.load();
-                galleryVideo.play().catch(() => {}); // Auto-play if allowed
-            }
-        });
-    });
-}
-
-// ========================================
-// 4D Point Cloud Viewer (Three.js)
-// Supports .splat file loading
-// ========================================
-class Viewer4D {
-    constructor(canvasId) {
-        this.canvas = document.getElementById(canvasId);
-        if (!this.canvas) return;
-        
-        this.container = this.canvas.parentElement;
-        this.scene = null;
-        this.camera = null;
-        this.renderer = null;
-        this.controls = null;
+class PlyViewer {
+    constructor(canvas, messageEl) {
+        this.canvas = canvas;
+        this.messageEl = messageEl;
+        this.container = canvas.parentElement;
         this.pointCloud = null;
-        this.message = document.getElementById('message');
-        
-        // Animation state
-        this.isPlaying = true;
-        this.currentFrame = 0;
-        this.totalFrames = 60;
-        this.lastFrameTime = 0;
-        this.frameInterval = 33;
-        this.rotationAngle = 0;
-        
-        // Splat data
-        this.splatData = null;
-        this.splatCenter = [0, 0, 0];
-        this.splatScale = 1;
-        this.currentScene = 'scene1';
-        this.abortController = null; // For cancelling pending requests
-        this.sceneCache = {}; // Cache loaded scenes
-        this.userInteractedDuringLoad = false; // Track if user interacted during loading
-        this.isLoading = false;
-        
-        // Measurement mode
-        this.measureMode = false;
-        this.measurePoints = [];
-        this.measureMarkers = [];
-        this.measureLine = null;
-        this.measureLabel = null;
-        this.raycaster = new THREE.Raycaster();
-        this.raycaster.params.Points.threshold = 0.1;
-        this.mouse = new THREE.Vector2();
-        
-        // UI elements
-        this.playPauseBtn = document.getElementById('play-pause');
-        this.frameSlider = document.getElementById('frame-slider');
-        this.frameCounter = document.getElementById('frame-counter');
-        
+        this.abortController = null;
+        this.cache = {};
+        this.currentKey = null;
+
         this.init();
-        this.initFloat16Table(); // Build lookup table for fast float16 conversion
-        this.loadSplatFile('assets/scene1.splat', 'scene1');
-        this.setupControls();
         this.animate();
-        
-        this.controls.addEventListener('start', () => {
-            if (this.isLoading) {
-                this.userInteractedDuringLoad = true;
-            }
-            this.hideMessage();
-        });
-        
-        // Setup measurement click handler
-        this.canvas.addEventListener('click', (e) => this.onCanvasClick(e));
-        this.initMeasureButton();
+        window.addEventListener('resize', () => this.onResize());
     }
-    
-    initMeasureButton() {
-        const btn = document.getElementById('measure-btn');
-        if (btn) {
-            btn.addEventListener('click', () => {
-                this.toggleMeasureMode();
-            });
-        }
-    }
-    
-    toggleMeasureMode() {
-        this.measureMode = !this.measureMode;
-        const btn = document.getElementById('measure-btn');
-        const hint = document.getElementById('measure-hint');
-        
-        if (btn) {
-            btn.classList.toggle('active', this.measureMode);
-            btn.title = this.measureMode ? 'Click to disable measurement' : 'Click two points to measure distance';
-        }
-        
-        // Show/hide hint text (outside viewer, like MapAnything)
-        if (hint) {
-            hint.classList.toggle('visible', this.measureMode);
-        }
-        
-        // Clear previous measurements when toggling off
-        if (!this.measureMode) {
-            this.clearMeasurement();
-        }
-        
-        // Change cursor
-        this.canvas.style.cursor = this.measureMode ? 'crosshair' : 'grab';
-    }
-    
-    onCanvasClick(event) {
-        if (!this.measureMode || !this.pointCloud) return;
-        
-        const rect = this.canvas.getBoundingClientRect();
-        this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-        this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-        
-        this.raycaster.setFromCamera(this.mouse, this.camera);
-        const intersects = this.raycaster.intersectObject(this.pointCloud);
-        
-        if (intersects.length > 0) {
-            const point = intersects[0].point.clone();
-            this.addMeasurePoint(point);
-        }
-    }
-    
-    addMeasurePoint(point) {
-        // If we already have 2 points, start fresh
-        if (this.measurePoints.length >= 2) {
-            this.clearMeasurement();
-        }
-        
-        this.measurePoints.push(point);
-        
-        // Create marker sphere
-        const markerGeom = new THREE.SphereGeometry(0.05, 16, 16);
-        const markerMat = new THREE.MeshBasicMaterial({ 
-            color: this.measurePoints.length === 1 ? 0x00ff00 : 0xff0000 
-        });
-        const marker = new THREE.Mesh(markerGeom, markerMat);
-        marker.position.copy(point);
-        this.scene.add(marker);
-        this.measureMarkers.push(marker);
-        
-        // If we have 2 points, draw line and show distance
-        if (this.measurePoints.length === 2) {
-            this.drawMeasureLine();
-            this.showDistance();
-        }
-    }
-    
-    drawMeasureLine() {
-        if (this.measureLine) {
-            this.scene.remove(this.measureLine);
-            this.measureLine.geometry.dispose();
-            this.measureLine.material.dispose();
-        }
-        
-        const points = this.measurePoints;
-        const geometry = new THREE.BufferGeometry().setFromPoints(points);
-        const material = new THREE.LineBasicMaterial({ 
-            color: 0xffff00, 
-            linewidth: 2,
-            depthTest: false
-        });
-        this.measureLine = new THREE.Line(geometry, material);
-        this.measureLine.renderOrder = 999;
-        this.scene.add(this.measureLine);
-    }
-    
-    showDistance() {
-        const p1 = this.measurePoints[0];
-        const p2 = this.measurePoints[1];
-        const distance = p1.distanceTo(p2);
-        
-        // Show distance in hint area (outside viewer, like MapAnything)
-        const hint = document.getElementById('measure-hint');
-        if (hint) {
-            hint.textContent = `Distance: ${distance.toFixed(2)} m`;
-        }
-        
-        // Create/update distance label in scene
-        this.updateDistanceLabel(distance);
-    }
-    
-    updateDistanceLabel(distance) {
-        // Remove old label
-        if (this.measureLabel) {
-            this.scene.remove(this.measureLabel);
-        }
-        
-        // Create canvas for text
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
-        canvas.width = 256;
-        canvas.height = 64;
-        
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-        ctx.roundRect(0, 0, canvas.width, canvas.height, 8);
-        ctx.fill();
-        
-        ctx.fillStyle = '#ffffff';
-        ctx.font = 'bold 28px Arial';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(`${distance.toFixed(2)} m`, canvas.width / 2, canvas.height / 2);
-        
-        const texture = new THREE.CanvasTexture(canvas);
-        const spriteMat = new THREE.SpriteMaterial({ 
-            map: texture,
-            depthTest: false
-        });
-        this.measureLabel = new THREE.Sprite(spriteMat);
-        
-        // Position label at midpoint
-        const midpoint = new THREE.Vector3().addVectors(
-            this.measurePoints[0], 
-            this.measurePoints[1]
-        ).multiplyScalar(0.5);
-        midpoint.y += 0.3; // Offset above the line
-        
-        this.measureLabel.position.copy(midpoint);
-        this.measureLabel.scale.set(1, 0.25, 1);
-        this.measureLabel.renderOrder = 1000;
-        this.scene.add(this.measureLabel);
-    }
-    
-    clearMeasurement() {
-        // Remove markers
-        this.measureMarkers.forEach(m => {
-            this.scene.remove(m);
-            m.geometry.dispose();
-            m.material.dispose();
-        });
-        this.measureMarkers = [];
-        
-        // Remove line
-        if (this.measureLine) {
-            this.scene.remove(this.measureLine);
-            this.measureLine.geometry.dispose();
-            this.measureLine.material.dispose();
-            this.measureLine = null;
-        }
-        
-        // Remove label
-        if (this.measureLabel) {
-            this.scene.remove(this.measureLabel);
-            this.measureLabel.material.map.dispose();
-            this.measureLabel.material.dispose();
-            this.measureLabel = null;
-        }
-        
-        this.measurePoints = [];
-        
-        // Reset hint text
-        const hint = document.getElementById('measure-hint');
-        if (hint) {
-            hint.textContent = 'Click two points to measure distance';
-        }
-    }
-    
+
     init() {
         const width = this.container.clientWidth;
         const height = this.container.clientHeight;
-        
+
         this.scene = new THREE.Scene();
         this.scene.background = new THREE.Color(0xffffff);
-        
-        this.camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 1000);
-        this.camera.position.set(3, 2, 3);
-        
-        this.renderer = new THREE.WebGLRenderer({ 
+
+        this.camera = new THREE.PerspectiveCamera(55, width / height, 0.01, 2000);
+        this.camera.position.set(2, 1.5, 2);
+
+        this.renderer = new THREE.WebGLRenderer({
             canvas: this.canvas,
-            antialias: false,  // Disable for better performance
+            antialias: false,
             powerPreference: 'high-performance'
         });
         this.renderer.setSize(width, height);
-        this.renderer.setPixelRatio(1);  // Lower pixel ratio for performance
-        
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+
         this.controls = new THREE.OrbitControls(this.camera, this.canvas);
         this.controls.enableDamping = true;
-        this.controls.dampingFactor = 0.05;
-        this.controls.minDistance = 0.1;
-        this.controls.maxDistance = 100;
-        this.controls.autoRotate = false;
-        
-        window.addEventListener('resize', () => this.onResize());
+        this.controls.dampingFactor = 0.08;
+        this.controls.minDistance = 0.05;
+        this.controls.maxDistance = 1000;
     }
-    
-    async loadSplatFile(url, sceneName = 'scene1') {
-        // Clear measurement when switching scenes
-        this.clearMeasurement();
-        
-        // Cancel any pending request
+
+    setMessage(text) {
+        if (!this.messageEl) return;
+        this.messageEl.textContent = text;
+        this.messageEl.style.display = text ? 'flex' : 'none';
+        this.messageEl.style.opacity = text ? '1' : '0';
+    }
+
+    clear() {
+        if (this.pointCloud) {
+            this.scene.remove(this.pointCloud);
+            this.pointCloud.geometry.dispose();
+            this.pointCloud.material.dispose();
+            this.pointCloud = null;
+        }
         if (this.abortController) {
             this.abortController.abort();
-        }
-        this.abortController = new AbortController();
-        
-        this.currentScene = sceneName;
-        
-        // Check cache first - instant display without camera reset
-        if (this.sceneCache[sceneName]) {
-            this.splatData = this.sceneCache[sceneName];
-            this.createPointCloudFromSplat(false); // Don't reset camera
-            return;
-        }
-        
-        this.showMessage('Loading 0%');
-        this.isLoading = true;
-        this.userInteractedDuringLoad = false;
-        
-        try {
-            const response = await fetch(url, { signal: this.abortController.signal });
-            if (!response.ok) {
-                throw new Error('Failed to load splat file');
-            }
-            
-            const contentLength = response.headers.get('content-length');
-            const total = contentLength ? parseInt(contentLength, 10) : 0;
-            const reader = response.body.getReader();
-            
-            const chunks = [];
-            let received = 0;
-            
-            // Stream download with progress display only (no intermediate renders)
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                
-                chunks.push(value);
-                received += value.length;
-                
-                // Update progress (cap at 100%)
-                if (total > 0) {
-                    const percent = Math.min(100, Math.round((received / total) * 100));
-                    this.showMessage(`Loading ${percent}%`);
-                }
-            }
-            
-            // Parse and render once at the end
-            const buffer = this.concatArrayBuffers(chunks);
-            this.parseSplatData(buffer);
-            
-            // Only reset camera if user didn't interact during loading
-            const shouldResetCamera = !this.userInteractedDuringLoad;
-            this.createPointCloudFromSplat(shouldResetCamera);
-            
-            // Cache the loaded data (clone to preserve original)
-            this.sceneCache[sceneName] = {
-                positions: this.splatData.positions.slice(),
-                colors: this.splatData.colors.slice(),
-                count: this.splatData.count
-            };
-            
-            this.isLoading = false;
-            this.hideMessage();
             this.abortController = null;
-            
-        } catch (error) {
-            this.isLoading = false;
-            if (error.name === 'AbortError') {
-                return;
+        }
+        this.setMessage('Click the play button to start');
+    }
+
+    async loadPly(cfg) {
+        const key = cfg.ply;
+        if (this.currentKey === key && this.pointCloud) return;
+        this.currentKey = key;
+
+        // Cancel any pending request
+        if (this.abortController) this.abortController.abort();
+        this.abortController = new AbortController();
+
+        this.setMessage('Loading 0%');
+
+        try {
+            let buffer = this.cache[key];
+            if (!buffer) {
+                const response = await fetch(key, { signal: this.abortController.signal });
+                if (!response.ok) throw new Error(`Failed to load: ${response.status}`);
+                const total = parseInt(response.headers.get('content-length') || '0', 10);
+                const reader = response.body.getReader();
+                const chunks = [];
+                let received = 0;
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    chunks.push(value);
+                    received += value.length;
+                    if (total > 0) {
+                        const percent = Math.min(100, Math.round((received / total) * 100));
+                        this.setMessage(`Loading ${percent}%`);
+                    }
+                }
+                buffer = concatChunks(chunks).buffer;
+                this.cache[key] = buffer;
             }
-            console.error('Error loading splat:', error);
-            this.createDemoScene();
-            this.hideMessage();
+
+            if (this.currentKey !== key) return; // user switched while loading
+
+            const geometry = parsePly(buffer);
+            this.buildPointCloud(geometry, cfg);
+            this.setMessage('');
+        } catch (err) {
+            if (err.name === 'AbortError') return;
+            console.error('Error loading PLY:', err);
+            this.setMessage('Failed to load point cloud');
         }
     }
-    
-    concatArrayBuffers(arrays) {
-        const totalLength = arrays.reduce((sum, arr) => sum + arr.length, 0);
-        const result = new Uint8Array(totalLength);
-        let offset = 0;
-        for (const arr of arrays) {
-            result.set(arr, offset);
-            offset += arr.length;
-        }
-        return result.buffer;
-    }
-    
-    parseSplatData(buffer) {
-        const view = new DataView(buffer);
-        let offset = 0;
-        
-        // Read point count (first 4 bytes as uint32 little-endian)
-        const pointCount = view.getUint32(offset, true);
-        offset = 4;
-        
-        console.log(`Loading ${pointCount.toLocaleString()} points`);
-        
-        // Read point data: [x_f16, y_f16, z_f16, r_u8, g_u8, b_u8, a_u8] = 10 bytes per point
-        const positions = new Float32Array(pointCount * 3);
-        const colors = new Float32Array(pointCount * 3);
-        
-        for (let i = 0; i < pointCount; i++) {
-            // Read float16 positions and convert to float32
-            const x = this.float16ToFloat32(view.getUint16(offset, true));
-            const y = this.float16ToFloat32(view.getUint16(offset + 2, true));
-            const z = this.float16ToFloat32(view.getUint16(offset + 4, true));
-            offset += 6;
-            
-            // Positions are already normalized in [-10, 10] range, flip Y for correct orientation
-            positions[i * 3] = x;
-            positions[i * 3 + 1] = -y; // Flip Y
-            positions[i * 3 + 2] = z;
-            
-            // Read colors (RGBA, but we only use RGB)
-            colors[i * 3] = view.getUint8(offset) / 255;
-            colors[i * 3 + 1] = view.getUint8(offset + 1) / 255;
-            colors[i * 3 + 2] = view.getUint8(offset + 2) / 255;
-            offset += 4;
-        }
-        
-        this.splatData = { positions, colors, count: pointCount };
-    }
-    
-    // Precomputed lookup table for float16 to float32 conversion (much faster)
-    initFloat16Table() {
-        if (this.float16Table) return;
-        this.float16Table = new Float32Array(65536);
-        for (let i = 0; i < 65536; i++) {
-            const s = (i & 0x8000) >> 15;
-            const e = (i & 0x7C00) >> 10;
-            const f = i & 0x03FF;
-            if (e === 0) {
-                this.float16Table[i] = (s ? -1 : 1) * (f / 1024) * (1 / 16384);
-            } else if (e === 31) {
-                this.float16Table[i] = f ? NaN : ((s ? -1 : 1) * Infinity);
-            } else {
-                this.float16Table[i] = (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024);
-            }
-        }
-    }
-    
-    float16ToFloat32(h) {
-        return this.float16Table[h];
-    }
-    
-    createPointCloudFromSplat(resetCamera = true) {
-        if (!this.splatData) return;
-        
+
+    buildPointCloud(geometry, cfg) {
         if (this.pointCloud) {
             this.scene.remove(this.pointCloud);
             this.pointCloud.geometry.dispose();
             this.pointCloud.material.dispose();
         }
-        
-        // Y is already flipped during parsing
-        const geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.BufferAttribute(this.splatData.positions, 3));
-        geometry.setAttribute('color', new THREE.BufferAttribute(this.splatData.colors, 3));
-        
-        // Center the point cloud
+
+        if (cfg.flipY) {
+            const pos = geometry.getAttribute('position');
+            for (let i = 0; i < pos.count; i++) pos.setY(i, -pos.getY(i));
+            pos.needsUpdate = true;
+        }
+
         geometry.computeBoundingBox();
         const center = new THREE.Vector3();
         geometry.boundingBox.getCenter(center);
         geometry.translate(-center.x, -center.y, -center.z);
-        
+        geometry.computeBoundingSphere();
+        const radius = geometry.boundingSphere.radius || 1;
+
         const material = new THREE.PointsMaterial({
-            size: 0.035,
-            vertexColors: true,
+            size: cfg.pointSize,
+            vertexColors: geometry.hasAttribute('color'),
+            color: geometry.hasAttribute('color') ? 0xffffff : 0x4477aa,
             sizeAttenuation: true
         });
-        
+
         this.pointCloud = new THREE.Points(geometry, material);
         this.scene.add(this.pointCloud);
-        
-        // Only reset camera for new scene loads
-        if (resetCamera) {
-            geometry.computeBoundingSphere();
-            const radius = geometry.boundingSphere.radius;
-            
-            // Scene-specific camera positions
-            const cameraSettings = {
-                'scene1': { x: -0.4, y: 0.5, z: -1.7 },
-                'scene2': { x: -0.4, y: 0.5, z: -1.7 },
-                'scene3': { x: -0.4, y: 0.15, z: -1.7 },
-                'scene4': { x: -0.4, y: 0.15, z: -1.7 },
-                'scene5': { x: -0.3, y: 0.3, z: -1.2 }
-            };
-            
-            const settings = cameraSettings[this.currentScene] || cameraSettings['scene1'];
-            this.camera.position.set(
-                radius * settings.x,
-                radius * settings.y,
-                radius * settings.z
-            );
-            this.controls.target.set(0, 0, 0);
-            this.controls.update();
-        }
+
+        const cam = cfg.camera || { x: -0.5, y: 0.3, z: -1.5 };
+        this.camera.position.set(radius * cam.x, radius * cam.y, radius * cam.z);
+        this.controls.target.set(0, 0, 0);
+        this.controls.update();
     }
-    
-    createDemoScene() {
-        // Fallback demo scene if splat loading fails
-        const pointCount = 50000;
-        const positions = new Float32Array(pointCount * 3);
-        const colors = new Float32Array(pointCount * 3);
-        
-        for (let i = 0; i < pointCount; i++) {
-            const i3 = i * 3;
-            positions[i3] = (Math.random() - 0.5) * 4;
-            positions[i3 + 1] = Math.random() * 2;
-            positions[i3 + 2] = (Math.random() - 0.5) * 4;
-            
-            const shade = 0.4 + Math.random() * 0.3;
-            colors[i3] = shade;
-            colors[i3 + 1] = shade - 0.05;
-            colors[i3 + 2] = shade - 0.1;
-        }
-        
-        const geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-        
-        const material = new THREE.PointsMaterial({
-            size: 0.015,
-            vertexColors: true,
-            sizeAttenuation: true
-        });
-        
-        this.pointCloud = new THREE.Points(geometry, material);
-        this.scene.add(this.pointCloud);
-    }
-    
-    showMessage(text) {
-        if (this.message) {
-            this.message.textContent = text;
-            this.message.style.display = 'flex';
-            this.message.style.opacity = '1';
-        }
-    }
-    
-    hideMessage() {
-        if (this.message && this.message.style.display !== 'none') {
-            this.message.style.opacity = '0';
-            setTimeout(() => {
-                this.message.style.display = 'none';
-            }, 300);
-        }
-    }
-    
-    setupControls() {
-        if (this.playPauseBtn) {
-            this.playPauseBtn.addEventListener('click', () => {
-                this.togglePlayback();
-            });
-        }
-        
-        if (this.frameSlider) {
-            this.frameSlider.max = this.totalFrames - 1;
-            
-            this.frameSlider.addEventListener('input', () => {
-                this.currentFrame = parseInt(this.frameSlider.value);
-                this.rotationAngle = (this.currentFrame / this.totalFrames) * Math.PI * 2;
-                this.updateUI();
-            });
-            
-            this.frameSlider.addEventListener('mousedown', () => {
-                this.wasPlaying = this.isPlaying;
-                this.isPlaying = false;
-                this.updatePlayPauseButton();
-            });
-            
-            this.frameSlider.addEventListener('mouseup', () => {
-                if (this.wasPlaying) {
-                    this.isPlaying = true;
-                    this.updatePlayPauseButton();
-                }
-            });
-        }
-        
-        this.updateUI();
-    }
-    
-    togglePlayback() {
-        this.isPlaying = !this.isPlaying;
-        this.updatePlayPauseButton();
-        this.hideMessage();
-    }
-    
-    updatePlayPauseButton() {
-        if (this.playPauseBtn) {
-            this.playPauseBtn.querySelector('span').textContent = this.isPlaying ? '⏸' : '▶';
-        }
-    }
-    
-    updateUI() {
-        if (this.frameSlider) {
-            this.frameSlider.value = this.currentFrame;
-        }
-        if (this.frameCounter) {
-            this.frameCounter.textContent = `${this.currentFrame} / ${this.totalFrames - 1}`;
-        }
-    }
-    
-    switchMode(mode) {
-        if (this.pointCloud) {
-            this.pointCloud.material.size = mode === 'pointcloud' ? 0.02 : 0.015;
-        }
-    }
-    
-    loadScene(sceneName) {
-        const sceneFiles = {
-            'scene1': 'assets/scene1.splat',
-            'scene2': 'assets/scene2.splat',
-            'scene3': 'assets/scene3.splat',
-            'scene4': 'assets/scene4.splat',
-            'scene5': 'assets/scene5.splat'
-        };
-        
-        const file = sceneFiles[sceneName] || `assets/${sceneName}.splat`;
-        this.loadSplatFile(file, sceneName);
-        
-        this.currentFrame = 0;
-        this.rotationAngle = 0;
-        this.isPlaying = true;
-        this.updatePlayPauseButton();
-        this.updateUI();
-    }
-    
+
     onResize() {
         const width = this.container.clientWidth;
         const height = this.container.clientHeight;
-        
         this.camera.aspect = width / height;
         this.camera.updateProjectionMatrix();
         this.renderer.setSize(width, height);
     }
-    
+
     animate() {
         requestAnimationFrame(() => this.animate());
-        
-        // Static point cloud - no auto rotation
-        // User can freely rotate with mouse/touch controls
-        
         this.controls.update();
         this.renderer.render(this.scene, this.camera);
     }
 }
 
-function initViewer() {
-    window.viewer4D = new Viewer4D('canvas');
+// ========================================
+// Binary little-endian PLY parser
+// Handles: x,y,z floats + red,green,blue[,alpha] uchars
+// (matches trimesh export used by UniT)
+// ========================================
+function parsePly(buffer) {
+    const bytes = new Uint8Array(buffer);
+    const headerEndMarker = 'end_header\n';
+    let headerEnd = -1;
+    for (let i = 0; i < bytes.length - headerEndMarker.length; i++) {
+        let match = true;
+        for (let j = 0; j < headerEndMarker.length; j++) {
+            if (bytes[i + j] !== headerEndMarker.charCodeAt(j)) { match = false; break; }
+        }
+        if (match) { headerEnd = i + headerEndMarker.length; break; }
+    }
+    if (headerEnd === -1) throw new Error('PLY header not terminated');
+
+    const header = new TextDecoder('ascii').decode(bytes.subarray(0, headerEnd));
+    const lines = header.split('\n');
+    let vertexCount = 0;
+    const props = [];
+    for (const line of lines) {
+        const parts = line.trim().split(/\s+/);
+        if (parts[0] === 'element' && parts[1] === 'vertex') {
+            vertexCount = parseInt(parts[2], 10);
+        } else if (parts[0] === 'property' && parts.length >= 3) {
+            props.push({ type: parts[1], name: parts[2] });
+        }
+    }
+
+    const typeSizes = { char: 1, uchar: 1, short: 2, ushort: 2, int: 4, uint: 4, float: 4, double: 8 };
+    let stride = 0;
+    for (const p of props) stride += typeSizes[p.type] || 0;
+
+    const view = new DataView(buffer, headerEnd);
+    const positions = new Float32Array(vertexCount * 3);
+    const hasColor = props.some(p => p.name === 'red' || p.name === 'r');
+    const colors = hasColor ? new Float32Array(vertexCount * 3) : null;
+
+    for (let i = 0; i < vertexCount; i++) {
+        let off = i * stride;
+        let px = 0, py = 0, pz = 0, r = 1, g = 1, b = 1;
+        for (const p of props) {
+            let val = 0;
+            switch (p.type) {
+                case 'float': val = view.getFloat32(off, true); off += 4; break;
+                case 'double': val = view.getFloat64(off, true); off += 8; break;
+                case 'uchar': case 'char': val = view.getUint8(off); off += 1; break;
+                case 'ushort': val = view.getUint16(off, true); off += 2; break;
+                case 'short': val = view.getInt16(off, true); off += 2; break;
+                case 'uint': val = view.getUint32(off, true); off += 4; break;
+                case 'int': val = view.getInt32(off, true); off += 4; break;
+                default: throw new Error(`Unsupported PLY type: ${p.type}`);
+            }
+            if (p.name === 'x') px = val;
+            else if (p.name === 'y') py = val;
+            else if (p.name === 'z') pz = val;
+            else if (p.name === 'red' || p.name === 'r') r = val / 255;
+            else if (p.name === 'green' || p.name === 'g') g = val / 255;
+            else if (p.name === 'blue' || p.name === 'b') b = val / 255;
+        }
+        positions[i * 3] = px;
+        positions[i * 3 + 1] = py;
+        positions[i * 3 + 2] = pz;
+        if (colors) {
+            colors[i * 3] = r;
+            colors[i * 3 + 1] = g;
+            colors[i * 3 + 2] = b;
+        }
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    if (colors) geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    return geometry;
+}
+
+function concatChunks(chunks) {
+    const total = chunks.reduce((s, a) => s + a.length, 0);
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) { out.set(c, off); off += c.length; }
+    return out;
 }
