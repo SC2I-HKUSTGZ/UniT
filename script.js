@@ -103,6 +103,10 @@ function initDemo() {
     const viewer = new PointCloudViewer(canvas, document.getElementById('demo-message'));
     const thumbs = document.querySelectorAll('.demo-thumb');
 
+    // Start fetching every cloud in the background at low priority so that
+    // switching between demos feels instant on warm connections.
+    Object.values(DEMO_CONFIGS).forEach(cfg => viewer.prefetch(cfg));
+
     let currentDemo = null;
     function select(key) {
         const cfg = DEMO_CONFIGS[key];
@@ -240,17 +244,26 @@ class PointCloudViewer {
         if (this.measurePoints.length >= 2) this.clearMeasurement();
         this.measurePoints.push(point);
 
-        const markerSize = Math.max(0.005, (this._sceneRadius || 1) * 0.012);
-        const geom = new THREE.SphereGeometry(markerSize, 16, 16);
-        const mat = new THREE.MeshBasicMaterial({
-            color: this.measurePoints.length === 1 ? 0x00c853 : 0xff3d00,
-            depthTest: false
-        });
-        const marker = new THREE.Mesh(geom, mat);
-        marker.renderOrder = 999;
-        marker.position.copy(point);
-        this.scene.add(marker);
-        this.measureMarkers.push(marker);
+        // Both markers use the same compact two-layer style: a small
+        // white core ringed by a blue halo.  Less visually noisy than
+        // green/red "start/end" spheres; drawn with depthTest off so
+        // they stay visible against the point cloud.
+        const r = Math.max(0.004, (this._sceneRadius || 1) * 0.010);
+        const core = new THREE.Mesh(
+            new THREE.SphereGeometry(r * 0.55, 16, 16),
+            new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false })
+        );
+        const halo = new THREE.Mesh(
+            new THREE.SphereGeometry(r, 16, 16),
+            new THREE.MeshBasicMaterial({ color: 0x1a73e8, transparent: true, opacity: 0.55, depthTest: false })
+        );
+        core.position.copy(point);
+        halo.position.copy(point);
+        core.renderOrder = 1001;
+        halo.renderOrder = 1000;
+        this.scene.add(halo);
+        this.scene.add(core);
+        this.measureMarkers.push(halo, core);
 
         if (this.measurePoints.length === 2) {
             this.drawMeasureLine();
@@ -266,7 +279,8 @@ class PointCloudViewer {
         }
         const geometry = new THREE.BufferGeometry().setFromPoints(this.measurePoints);
         const material = new THREE.LineBasicMaterial({
-            color: 0xffb300, linewidth: 2, depthTest: false
+            color: 0x1a73e8, linewidth: 2, depthTest: false,
+            transparent: true, opacity: 0.85
         });
         this.measureLine = new THREE.Line(geometry, material);
         this.measureLine.renderOrder = 999;
@@ -274,9 +288,11 @@ class PointCloudViewer {
     }
 
     showDistance() {
+        // Scene units in UniT reconstructions are metric (meters).
         const d = this.measurePoints[0].distanceTo(this.measurePoints[1]);
+        const formatted = d >= 10 ? d.toFixed(1) : d.toFixed(2);
         if (this.measureHintEl) {
-            this.measureHintEl.textContent = `Distance: ${d.toFixed(2)} (scene units)`;
+            this.measureHintEl.textContent = `Distance: ${formatted} m`;
         }
 
         if (this.measureLabel) {
@@ -284,26 +300,42 @@ class PointCloudViewer {
             this.measureLabel.material.map?.dispose();
             this.measureLabel.material.dispose();
         }
+
+        // Rounded-pill label drawn onto a 2× canvas, used as a Sprite.
+        const DPR = 2;
         const canvas = document.createElement('canvas');
-        canvas.width = 256; canvas.height = 64;
+        canvas.width = 320 * DPR;
+        canvas.height = 96 * DPR;
         const ctx = canvas.getContext('2d');
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.fillStyle = '#fff';
-        ctx.font = 'bold 28px Arial';
+        ctx.scale(DPR, DPR);
+        const w = 320, h = 96;
+        const pad = 14, radius = 20;
+        const boxW = w - pad * 2, boxH = h - pad * 2;
+        ctx.fillStyle = 'rgba(26, 115, 232, 0.95)';
+        ctx.beginPath();
+        ctx.roundRect(pad, pad, boxW, boxH, radius);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '600 42px "Google Sans", Arial, sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(d.toFixed(2), canvas.width / 2, canvas.height / 2);
+        ctx.fillText(`${formatted} m`, w / 2, h / 2 + 2);
 
         const tex = new THREE.CanvasTexture(canvas);
+        tex.minFilter = THREE.LinearFilter;
         const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false });
         this.measureLabel = new THREE.Sprite(mat);
         const mid = new THREE.Vector3().addVectors(this.measurePoints[0], this.measurePoints[1]).multiplyScalar(0.5);
-        mid.y += (this._sceneRadius || 1) * 0.05;
+        mid.y += (this._sceneRadius || 1) * 0.06;
         this.measureLabel.position.copy(mid);
-        const labelScale = (this._sceneRadius || 1) * 0.22;
-        this.measureLabel.scale.set(labelScale, labelScale * 0.25, 1);
-        this.measureLabel.renderOrder = 1000;
+        // Label size scales with the scene so it reads at roughly the
+        // same apparent size across indoor toys and KITTI streets.
+        const s = (this._sceneRadius || 1) * 0.18;
+        this.measureLabel.scale.set(s, s * (96 / 320), 1);
+        this.measureLabel.renderOrder = 1002;
         this.scene.add(this.measureLabel);
     }
 
@@ -483,35 +515,64 @@ class PointCloudViewer {
 }
 
 // ========================================
-// .pnt parser — zero-copy typed-array aliases
+// .pnt parser
 //
-// Format:
+// v1 (legacy, still supported for safety):
 //   [0..4)    magic "UNPT"
-//   [4..8)    version (uint32 LE, currently 1)
-//   [8..12)   vertex count (uint32 LE)
-//   [12 .. 12+n*12)            float32 xyz
-//   [12+n*12 .. 12+n*15)       uint8   rgb
+//   [4..8)    version = 1
+//   [8..12)   count (uint32 LE)
+//   [12 .. 12+n*12)      float32 xyz
+//   [12+n*12 .. 12+n*15) uint8   rgb
+//
+// v2 (current, ~40% smaller — quantized int16 positions):
+//   [0..4)    magic "UNPT"
+//   [4..8)    version = 2
+//   [8..12)   count (uint32 LE)
+//   [12..24)  min_xyz   (3 × float32)
+//   [24..36)  scale_xyz (3 × float32)
+//   [36 .. 36+n*6)       uint16 quantized xyz
+//   [36+n*6 .. 36+n*9)   uint8  rgb
 // ========================================
 function parsePnt(buffer) {
-    const header = new DataView(buffer, 0, 12);
+    const view = new DataView(buffer);
     const magic =
-        String.fromCharCode(header.getUint8(0)) +
-        String.fromCharCode(header.getUint8(1)) +
-        String.fromCharCode(header.getUint8(2)) +
-        String.fromCharCode(header.getUint8(3));
+        String.fromCharCode(view.getUint8(0)) +
+        String.fromCharCode(view.getUint8(1)) +
+        String.fromCharCode(view.getUint8(2)) +
+        String.fromCharCode(view.getUint8(3));
     if (magic !== 'UNPT') throw new Error(`Not a UNPT file (got "${magic}")`);
-    const version = header.getUint32(4, true);
-    if (version !== 1) throw new Error(`Unsupported UNPT version ${version}`);
-    const count = header.getUint32(8, true);
+    const version = view.getUint32(4, true);
+    const count = view.getUint32(8, true);
 
-    // Zero-copy: these views alias directly into the downloaded buffer.
-    const positions = new Float32Array(buffer, 12, count * 3);
-    const colors = new Uint8Array(buffer, 12 + count * 12, count * 3);
+    let positions, colors;
+    if (version === 2) {
+        const minX = view.getFloat32(12, true);
+        const minY = view.getFloat32(16, true);
+        const minZ = view.getFloat32(20, true);
+        const sx = view.getFloat32(24, true);
+        const sy = view.getFloat32(28, true);
+        const sz = view.getFloat32(32, true);
+        const q = new Uint16Array(buffer, 36, count * 3);
+        positions = new Float32Array(count * 3);
+        // Tight decode loop — ~10 ms for 500k verts on M1.
+        for (let i = 0; i < count; i++) {
+            const j = i * 3;
+            positions[j]     = minX + q[j]     * sx;
+            positions[j + 1] = minY + q[j + 1] * sy;
+            positions[j + 2] = minZ + q[j + 2] * sz;
+        }
+        colors = new Uint8Array(buffer, 36 + count * 6, count * 3);
+    } else if (version === 1) {
+        // Zero-copy views directly into the downloaded buffer.
+        positions = new Float32Array(buffer, 12, count * 3);
+        colors = new Uint8Array(buffer, 12 + count * 12, count * 3);
+    } else {
+        throw new Error(`Unsupported UNPT version ${version}`);
+    }
 
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    // normalized=true tells WebGL to divide u8 by 255 in the shader,
-    // so we ship 1 byte/channel instead of 4.
+    // normalized=true → shader divides u8 by 255 so we ship 1 byte/channel.
     geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3, true));
     return geometry;
 }
