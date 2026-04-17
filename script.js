@@ -42,24 +42,24 @@ const DEMO_CONFIGS = {
     hkust_intr: {
         title: 'HKUST INTR',
         cloud: 'assets/demos/hkust_intr/scene.pnt',
-        density: 550000,
-        pointSize: 0.035,
+        density: 980000,
+        pointSize: 0.022,
         flipY: true,
         camera: { x: -0.6, y: 0.3, z: -1.4 }
     },
     hkust_toy: {
         title: 'HKUST Toy',
         cloud: 'assets/demos/hkust_toy/scene.pnt',
-        density: 280000,
-        pointSize: 0.011,
+        density: 520000,
+        pointSize: 0.0075,
         flipY: true,
         camera: { x: -0.4, y: 0.2, z: -1.5 }
     },
     hkust_redbird: {
         title: 'HKUST Red Bird',
         cloud: 'assets/demos/hkust_redbird/scene.pnt',
-        density: 400000,
-        pointSize: 0.11,
+        density: 610000,
+        pointSize: 0.075,
         flipY: true,
         camera: { x: -0.5, y: 0.35, z: -1.6 }
     },
@@ -67,23 +67,23 @@ const DEMO_CONFIGS = {
         title: 'Drift',
         cloud: 'assets/demos/drift/scene.pnt',
         density: 320000,
-        pointSize: 0.28,
+        pointSize: 0.18,
         flipY: true,
         camera: { x: -0.25, y: 0.25, z: -0.75 }
     },
     gta_sfm: {
         title: 'GTA SfM',
         cloud: 'assets/demos/gta_sfm/scene.pnt',
-        density: 520000,
-        pointSize: 0.2,
+        density: 720000,
+        pointSize: 0.14,
         flipY: true,
         camera: { x: -0.4, y: 0.2, z: -1.4 }
     },
     kitti: {
         title: 'KITTI',
         cloud: 'assets/demos/kitti/scene.pnt',
-        density: 450000,
-        pointSize: 0.65,
+        density: 630000,
+        pointSize: 0.45,
         flipY: true,
         camera: { x: -0.15, y: 0.22, z: -0.5 }
     }
