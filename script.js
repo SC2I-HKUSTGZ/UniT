@@ -33,7 +33,7 @@ function initNavigation() {
 const DEMO_CONFIGS = {
     hkust_intr: {
         title: 'HKUST INTR',
-        ply: 'assets/demos/hkust_intr/scene.ply',
+        cloud: 'assets/demos/hkust_intr/scene.pnt',
         video: 'assets/demos/hkust_intr/reconstructed.mp4',
         pointSize: 0.05,
         flipY: true,
@@ -41,7 +41,7 @@ const DEMO_CONFIGS = {
     },
     hkust_toy: {
         title: 'HKUST Toy',
-        ply: 'assets/demos/hkust_toy/scene.ply',
+        cloud: 'assets/demos/hkust_toy/scene.pnt',
         video: 'assets/demos/hkust_toy/reconstructed.mp4',
         pointSize: 0.012,
         flipY: true,
@@ -49,7 +49,7 @@ const DEMO_CONFIGS = {
     },
     hkust_redbird: {
         title: 'HKUST Red Bird',
-        ply: 'assets/demos/hkust_redbird/scene.ply',
+        cloud: 'assets/demos/hkust_redbird/scene.pnt',
         video: 'assets/demos/hkust_redbird/reconstructed.mp4',
         pointSize: 0.14,
         flipY: true,
@@ -57,7 +57,7 @@ const DEMO_CONFIGS = {
     },
     drift: {
         title: 'Drift',
-        ply: 'assets/demos/drift/scene.ply',
+        cloud: 'assets/demos/drift/scene.pnt',
         video: 'assets/demos/drift/reconstructed.mp4',
         pointSize: 0.3,
         flipY: true,
@@ -65,7 +65,7 @@ const DEMO_CONFIGS = {
     },
     gta_sfm: {
         title: 'GTA SfM',
-        ply: 'assets/demos/gta_sfm/scene.ply',
+        cloud: 'assets/demos/gta_sfm/scene.pnt',
         video: 'assets/demos/gta_sfm/reconstructed.mp4',
         pointSize: 0.25,
         flipY: true,
@@ -73,7 +73,7 @@ const DEMO_CONFIGS = {
     },
     kitti: {
         title: 'KITTI',
-        ply: 'assets/demos/kitti/scene.ply',
+        cloud: 'assets/demos/kitti/scene.pnt',
         video: 'assets/demos/kitti/reconstructed.mp4',
         pointSize: 0.9,
         flipY: true,
@@ -88,7 +88,7 @@ function initDemo() {
     const canvas = document.getElementById('demo-canvas');
     if (!canvas) return;
 
-    const viewer = new PlyViewer(canvas, document.getElementById('demo-message'));
+    const viewer = new PointCloudViewer(canvas, document.getElementById('demo-message'));
     const video = document.getElementById('demo-video');
     const cover = document.getElementById('demo-cover');
     const coverImg = document.getElementById('demo-cover-img');
@@ -96,20 +96,21 @@ function initDemo() {
 
     let currentDemo = null;
 
-    function showCoverFor(key) {
+    function activate(key) {
         const cfg = DEMO_CONFIGS[key];
         if (!cfg) return;
+        currentDemo = key;
+        thumbs.forEach(t => t.classList.toggle('selected', t.dataset.demo === key));
         coverImg.src = `assets/demos/${key}/cover.jpg`;
         video.pause();
         video.removeAttribute('src');
         video.load();
         cover.classList.remove('hidden');
-    }
 
-    function activate(key) {
-        currentDemo = key;
-        thumbs.forEach(t => t.classList.toggle('selected', t.dataset.demo === key));
-        showCoverFor(key);
+        // Best practice: kick off network fetch as soon as the user hints at
+        // interest (thumbnail click / page load), so by the time they press
+        // play the bytes are already on-device or mid-flight.
+        viewer.prefetch(cfg);
     }
 
     function playDemo() {
@@ -118,11 +119,10 @@ function initDemo() {
         cover.classList.add('hidden');
         video.src = cfg.video;
         video.load();
-        video.play().catch(() => { /* autoplay blocked — user already clicked, should be fine */ });
-        viewer.loadPly(cfg);
+        video.play().catch(() => {}); // autoplay blocked — user already clicked
+        viewer.show(cfg);
     }
 
-    // Thumbnail click: switch preview + reset viewer
     thumbs.forEach(t => {
         t.addEventListener('click', () => {
             const key = t.dataset.demo;
@@ -132,25 +132,26 @@ function initDemo() {
         });
     });
 
-    // Cover click: play video + load point cloud
     cover.addEventListener('click', playDemo);
 
-    // Default selection
     activate('hkust_intr');
 }
 
 // ========================================
-// PLY point cloud viewer (THREE.js PLYLoader)
+// Point cloud viewer
+//
+// Loads .pnt files with zero-copy typed-array views (basically free vs. the
+// old per-vertex DataView loop).  prefetch() kicks off the fetch on
+// thumbnail select; show() awaits it + builds the Points mesh.
 // ========================================
-class PlyViewer {
+class PointCloudViewer {
     constructor(canvas, messageEl) {
         this.canvas = canvas;
         this.messageEl = messageEl;
         this.container = canvas.parentElement;
         this.pointCloud = null;
-        this.abortController = null;
-        this.cache = {};
         this.currentKey = null;
+        this.pending = new Map(); // key → { promise, abort, progress }
 
         this.init();
         this.animate();
@@ -196,57 +197,82 @@ class PlyViewer {
             this.pointCloud.material.dispose();
             this.pointCloud = null;
         }
-        if (this.abortController) {
-            this.abortController.abort();
-            this.abortController = null;
-        }
+        this.currentKey = null;
         this.setMessage('Click the play button to start');
     }
 
-    async loadPly(cfg) {
-        const key = cfg.ply;
-        if (this.currentKey === key && this.pointCloud) return;
-        this.currentKey = key;
+    prefetch(cfg) {
+        const url = cfg.cloud;
+        if (this.pending.has(url)) return this.pending.get(url).promise;
 
-        // Cancel any pending request
-        if (this.abortController) this.abortController.abort();
-        this.abortController = new AbortController();
+        const abort = new AbortController();
+        const state = { abort, progress: 0, buffer: null };
+        const promise = this._fetchBuffer(url, abort.signal, pct => {
+            state.progress = pct;
+            if (this.currentKey === url) this.setMessage(`Loading ${pct}%`);
+        }).then(buf => {
+            state.buffer = buf;
+            return buf;
+        }).catch(err => {
+            if (err.name !== 'AbortError') {
+                console.error('Prefetch failed:', err);
+                this.pending.delete(url);
+            }
+            throw err;
+        });
+        state.promise = promise;
+        this.pending.set(url, state);
+        return promise;
+    }
 
-        this.setMessage('Loading 0%');
+    async show(cfg) {
+        const url = cfg.cloud;
+        if (this.currentKey === url && this.pointCloud) return;
+        this.currentKey = url;
+
+        const state = this.pending.get(url) || { promise: this.prefetch(cfg) };
+        this.setMessage(state.buffer ? '' : `Loading ${state.progress || 0}%`);
 
         try {
-            let buffer = this.cache[key];
-            if (!buffer) {
-                const response = await fetch(key, { signal: this.abortController.signal });
-                if (!response.ok) throw new Error(`Failed to load: ${response.status}`);
-                const total = parseInt(response.headers.get('content-length') || '0', 10);
-                const reader = response.body.getReader();
-                const chunks = [];
-                let received = 0;
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    chunks.push(value);
-                    received += value.length;
-                    if (total > 0) {
-                        const percent = Math.min(100, Math.round((received / total) * 100));
-                        this.setMessage(`Loading ${percent}%`);
-                    }
-                }
-                buffer = concatChunks(chunks).buffer;
-                this.cache[key] = buffer;
-            }
+            const buffer = await state.promise;
+            if (this.currentKey !== url) return; // user switched while loading
 
-            if (this.currentKey !== key) return; // user switched while loading
-
-            const geometry = parsePly(buffer);
+            const t0 = performance.now();
+            const geometry = parsePnt(buffer);
             this.buildPointCloud(geometry, cfg);
+            console.debug(`PNT parse+build: ${(performance.now() - t0).toFixed(1)}ms`);
             this.setMessage('');
         } catch (err) {
             if (err.name === 'AbortError') return;
-            console.error('Error loading PLY:', err);
+            console.error('Error loading point cloud:', err);
             this.setMessage('Failed to load point cloud');
         }
+    }
+
+    async _fetchBuffer(url, signal, onProgress) {
+        const response = await fetch(url, { signal });
+        if (!response.ok) throw new Error(`Failed to load: ${response.status}`);
+
+        const total = parseInt(response.headers.get('content-length') || '0', 10);
+        const reader = response.body.getReader();
+        const chunks = [];
+        let received = 0;
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            received += value.length;
+            if (total > 0 && onProgress) {
+                onProgress(Math.min(100, Math.round((received / total) * 100)));
+            }
+        }
+
+        // Concatenate into a single ArrayBuffer, so the Float32/Uint8 views
+        // below can alias the contents with zero copy.
+        const out = new Uint8Array(received);
+        let off = 0;
+        for (const c of chunks) { out.set(c, off); off += c.length; }
+        return out.buffer;
     }
 
     buildPointCloud(geometry, cfg) {
@@ -257,9 +283,9 @@ class PlyViewer {
         }
 
         if (cfg.flipY) {
-            const pos = geometry.getAttribute('position');
-            for (let i = 0; i < pos.count; i++) pos.setY(i, -pos.getY(i));
-            pos.needsUpdate = true;
+            // In-place scale on a zero-copy Float32Array view
+            const pos = geometry.getAttribute('position').array;
+            for (let i = 1; i < pos.length; i += 3) pos[i] = -pos[i];
         }
 
         geometry.computeBoundingBox();
@@ -271,8 +297,7 @@ class PlyViewer {
 
         const material = new THREE.PointsMaterial({
             size: cfg.pointSize,
-            vertexColors: geometry.hasAttribute('color'),
-            color: geometry.hasAttribute('color') ? 0xffffff : 0x4477aa,
+            vertexColors: true,
             sizeAttenuation: true
         });
 
@@ -301,87 +326,35 @@ class PlyViewer {
 }
 
 // ========================================
-// Binary little-endian PLY parser
-// Handles: x,y,z floats + red,green,blue[,alpha] uchars
-// (matches trimesh export used by UniT)
+// .pnt parser — zero-copy typed-array aliases
+//
+// Format:
+//   [0..4)    magic "UNPT"
+//   [4..8)    version (uint32 LE, currently 1)
+//   [8..12)   vertex count (uint32 LE)
+//   [12 .. 12+n*12)            float32 xyz
+//   [12+n*12 .. 12+n*15)       uint8   rgb
 // ========================================
-function parsePly(buffer) {
-    const bytes = new Uint8Array(buffer);
-    const headerEndMarker = 'end_header\n';
-    let headerEnd = -1;
-    for (let i = 0; i < bytes.length - headerEndMarker.length; i++) {
-        let match = true;
-        for (let j = 0; j < headerEndMarker.length; j++) {
-            if (bytes[i + j] !== headerEndMarker.charCodeAt(j)) { match = false; break; }
-        }
-        if (match) { headerEnd = i + headerEndMarker.length; break; }
-    }
-    if (headerEnd === -1) throw new Error('PLY header not terminated');
+function parsePnt(buffer) {
+    const header = new DataView(buffer, 0, 12);
+    const magic =
+        String.fromCharCode(header.getUint8(0)) +
+        String.fromCharCode(header.getUint8(1)) +
+        String.fromCharCode(header.getUint8(2)) +
+        String.fromCharCode(header.getUint8(3));
+    if (magic !== 'UNPT') throw new Error(`Not a UNPT file (got "${magic}")`);
+    const version = header.getUint32(4, true);
+    if (version !== 1) throw new Error(`Unsupported UNPT version ${version}`);
+    const count = header.getUint32(8, true);
 
-    const header = new TextDecoder('ascii').decode(bytes.subarray(0, headerEnd));
-    const lines = header.split('\n');
-    let vertexCount = 0;
-    const props = [];
-    for (const line of lines) {
-        const parts = line.trim().split(/\s+/);
-        if (parts[0] === 'element' && parts[1] === 'vertex') {
-            vertexCount = parseInt(parts[2], 10);
-        } else if (parts[0] === 'property' && parts.length >= 3) {
-            props.push({ type: parts[1], name: parts[2] });
-        }
-    }
-
-    const typeSizes = { char: 1, uchar: 1, short: 2, ushort: 2, int: 4, uint: 4, float: 4, double: 8 };
-    let stride = 0;
-    for (const p of props) stride += typeSizes[p.type] || 0;
-
-    const view = new DataView(buffer, headerEnd);
-    const positions = new Float32Array(vertexCount * 3);
-    const hasColor = props.some(p => p.name === 'red' || p.name === 'r');
-    const colors = hasColor ? new Float32Array(vertexCount * 3) : null;
-
-    for (let i = 0; i < vertexCount; i++) {
-        let off = i * stride;
-        let px = 0, py = 0, pz = 0, r = 1, g = 1, b = 1;
-        for (const p of props) {
-            let val = 0;
-            switch (p.type) {
-                case 'float': val = view.getFloat32(off, true); off += 4; break;
-                case 'double': val = view.getFloat64(off, true); off += 8; break;
-                case 'uchar': case 'char': val = view.getUint8(off); off += 1; break;
-                case 'ushort': val = view.getUint16(off, true); off += 2; break;
-                case 'short': val = view.getInt16(off, true); off += 2; break;
-                case 'uint': val = view.getUint32(off, true); off += 4; break;
-                case 'int': val = view.getInt32(off, true); off += 4; break;
-                default: throw new Error(`Unsupported PLY type: ${p.type}`);
-            }
-            if (p.name === 'x') px = val;
-            else if (p.name === 'y') py = val;
-            else if (p.name === 'z') pz = val;
-            else if (p.name === 'red' || p.name === 'r') r = val / 255;
-            else if (p.name === 'green' || p.name === 'g') g = val / 255;
-            else if (p.name === 'blue' || p.name === 'b') b = val / 255;
-        }
-        positions[i * 3] = px;
-        positions[i * 3 + 1] = py;
-        positions[i * 3 + 2] = pz;
-        if (colors) {
-            colors[i * 3] = r;
-            colors[i * 3 + 1] = g;
-            colors[i * 3 + 2] = b;
-        }
-    }
+    // Zero-copy: these views alias directly into the downloaded buffer.
+    const positions = new Float32Array(buffer, 12, count * 3);
+    const colors = new Uint8Array(buffer, 12 + count * 12, count * 3);
 
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    if (colors) geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    // normalized=true tells WebGL to divide u8 by 255 in the shader,
+    // so we ship 1 byte/channel instead of 4.
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3, true));
     return geometry;
-}
-
-function concatChunks(chunks) {
-    const total = chunks.reduce((s, a) => s + a.length, 0);
-    const out = new Uint8Array(total);
-    let off = 0;
-    for (const c of chunks) { out.set(c, off); off += c.length; }
-    return out;
 }
