@@ -103,11 +103,8 @@ function initDemo() {
     const viewer = new PointCloudViewer(canvas, document.getElementById('demo-message'));
     const thumbs = document.querySelectorAll('.demo-thumb');
 
-    // Start fetching every cloud in the background at low priority so that
-    // switching between demos feels instant on warm connections.
-    Object.values(DEMO_CONFIGS).forEach(cfg => viewer.prefetch(cfg));
-
     let currentDemo = null;
+
     function select(key) {
         const cfg = DEMO_CONFIGS[key];
         if (!cfg || key === currentDemo) return;
@@ -125,7 +122,40 @@ function initDemo() {
                 v.currentTime = 0;
             }
         });
-        viewer.show(cfg);
+        viewer.show(cfg).then(() => scheduleBackgroundPrefetch(key));
+    }
+
+    // Background prefetch of the *other* demos, one at a time, kicked off
+    // only after the currently-selected cloud has finished loading.  On
+    // slow links this prevents six ~3 MB fetches from fighting over the
+    // same pipe and making every single one feel slow.
+    let prefetchTimer = null;
+    function scheduleBackgroundPrefetch(priorityKey) {
+        if (prefetchTimer) { clearTimeout(prefetchTimer); prefetchTimer = null; }
+
+        // Skip on known-slow connections.
+        const conn = navigator.connection;
+        if (conn) {
+            if (conn.saveData) return;
+            if (['slow-2g', '2g'].includes(conn.effectiveType)) return;
+        }
+
+        const queue = Object.keys(DEMO_CONFIGS).filter(k => k !== priorityKey);
+
+        const runNext = () => {
+            if (queue.length === 0 || currentDemo !== priorityKey) return;
+            const key = queue.shift();
+            const cfg = DEMO_CONFIGS[key];
+            viewer.prefetch(cfg)
+                .catch(() => {}) // ignore cancels/failures — user-initiated picks win
+                .finally(() => {
+                    if (currentDemo !== priorityKey) return;
+                    prefetchTimer = setTimeout(runNext, 500);
+                });
+        };
+        // Small initial delay so the selected demo finishes parsing /
+        // first paint before we start pulling neighbours.
+        prefetchTimer = setTimeout(runNext, 1500);
     }
 
     thumbs.forEach(t => {
@@ -385,10 +415,13 @@ class PointCloudViewer {
 
     prefetch(cfg) {
         const url = cfg.cloud;
-        if (this.pending.has(url)) return this.pending.get(url).promise;
+        if (this.pending.has(url)) {
+            const existing = this.pending.get(url);
+            if (existing.buffer || !existing.aborted) return existing.promise;
+        }
 
         const abort = new AbortController();
-        const state = { abort, progress: 0, buffer: null };
+        const state = { abort, progress: 0, buffer: null, aborted: false };
         const promise = this._fetchBuffer(url, abort.signal, pct => {
             state.progress = pct;
             if (this.currentKey === url) this.setMessage(`Loading ${pct}%`);
@@ -399,6 +432,8 @@ class PointCloudViewer {
             if (err.name !== 'AbortError') {
                 console.error('Prefetch failed:', err);
                 this.pending.delete(url);
+            } else {
+                state.aborted = true;
             }
             throw err;
         });
@@ -407,10 +442,24 @@ class PointCloudViewer {
         return promise;
     }
 
+    // Abort any in-flight prefetches for URLs other than `keepUrl`.
+    // Called when the user picks a new demo so on slow connections the
+    // newly-selected cloud gets the full pipe immediately instead of
+    // competing with leftover background fetches.
+    cancelOtherFetches(keepUrl) {
+        for (const [url, state] of this.pending.entries()) {
+            if (url === keepUrl) continue;
+            if (state.buffer) continue;          // already done, keep the cached bytes
+            state.abort.abort();
+            this.pending.delete(url);
+        }
+    }
+
     async show(cfg) {
         const url = cfg.cloud;
         if (this.currentKey === url && this.pointCloud) return;
         this.currentKey = url;
+        this.cancelOtherFetches(url);
 
         const state = this.pending.get(url) || { promise: this.prefetch(cfg) };
         this.setMessage(state.buffer ? '' : `Loading ${state.progress || 0}%`);
