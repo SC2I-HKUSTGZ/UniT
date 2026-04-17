@@ -264,7 +264,7 @@ sup {
     gap: 10px;
 }
 
-/* Interactive Examples — two-panel layout */
+/* Interactive Examples — single centered 3D viewer + video thumbnails */
 .demo-hint {
     text-align: center;
     color: #5f6368;
@@ -272,82 +272,62 @@ sup {
     margin-bottom: 18px;
 }
 
-.demo-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 14px;
-    width: 100%;
-}
-
-.demo-video-panel,
 .demo-ply-panel {
     position: relative;
+    width: 100%;
+    max-width: 1000px;
+    margin: 0 auto;
     border-radius: 16px;
     overflow: hidden;
     background-color: #f8f9fa;
-    aspect-ratio: 16 / 10;
-    min-height: 320px;
+    aspect-ratio: 16 / 9;
+    min-height: 380px;
 }
 
-.demo-video-panel {
-    background-color: #000;
-}
-
-.demo-video-panel video {
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-    display: block;
-    background: #000;
-}
-
-.demo-cover {
+.measure-button {
     position: absolute;
-    inset: 0;
-    cursor: pointer;
-    z-index: 2;
-    transition: opacity 0.25s ease;
-}
-
-.demo-cover.hidden {
-    opacity: 0;
-    pointer-events: none;
-}
-
-.demo-cover img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    display: block;
-}
-
-.demo-play-btn {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    width: 72px;
-    height: 72px;
-    border-radius: 50%;
+    top: 12px;
+    right: 12px;
+    z-index: 10;
+    width: 42px;
+    height: 42px;
     border: none;
-    background: rgba(255, 255, 255, 0.92);
-    color: #1a73e8;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.94);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
     cursor: pointer;
+    font-size: 20px;
     display: flex;
     align-items: center;
     justify-content: center;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-    transition: transform 0.2s ease, background 0.2s ease;
-    pointer-events: none;
+    transition: transform 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
 
-.demo-cover:hover .demo-play-btn {
-    transform: translate(-50%, -50%) scale(1.08);
+.measure-button:hover {
     background: #fff;
+    transform: scale(1.05);
 }
 
-.demo-play-btn svg {
-    margin-left: 4px;
+.measure-button.active {
+    background: #1a73e8;
+    color: #fff;
+}
+
+.measure-hint {
+    display: none;
+    text-align: center;
+    color: #e67e22;
+    font-size: 0.85em;
+    padding: 8px 16px;
+    background: #fff8f0;
+    border: 1px solid #f5cba7;
+    border-radius: 6px;
+    width: fit-content;
+    margin: 0 auto 12px;
+}
+
+.measure-hint.visible {
+    display: block;
 }
 
 #demo-message {
@@ -374,7 +354,7 @@ sup {
 }
 
 .demo-thumbs {
-    gap: 10px;
+    gap: 14px;
     justify-content: center;
     flex-wrap: wrap;
 }
@@ -393,16 +373,17 @@ sup {
     font-family: inherit;
 }
 
-.demo-thumb img {
-    width: 110px;
-    height: 70px;
+.demo-thumb video {
+    width: 150px;
+    height: 94px;
     object-fit: cover;
     border-radius: 6px;
     display: block;
+    background: #000;
 }
 
 .demo-thumb span {
-    font-size: 0.78em;
+    font-size: 0.82em;
     color: #5f6368;
     font-weight: 500;
     line-height: 1.2;
@@ -422,16 +403,12 @@ sup {
 }
 
 @media (max-width: 800px) {
-    .demo-row {
-        grid-template-columns: 1fr;
-    }
-    .demo-video-panel,
     .demo-ply-panel {
-        min-height: 260px;
+        min-height: 280px;
     }
-    .demo-thumb img {
-        width: 88px;
-        height: 56px;
+    .demo-thumb video {
+        width: 110px;
+        height: 68px;
     }
 }
 

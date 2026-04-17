@@ -30,111 +30,105 @@ function initNavigation() {
 // flipY=true matches trimesh's export of the UniT outputs.
 // camera is the (unit) offset from bbox center, scaled by bounding sphere radius.
 // ========================================
+// Per-demo visual tuning.
+// density: how many points the .pnt was sampled to (just for reference — the
+//   file itself determines the actual count).  Paired with `pointSize` so
+//   rendered density looks balanced across very different scene scales.
+// pointSize: world-unit size of each splat (sizeAttenuation is on, so
+//   pixel size shrinks with distance).  Tuned visually per scene.
+// camera: unit-offset from the cloud's bounding-sphere center, scaled by
+//   the sphere radius at load time.
 const DEMO_CONFIGS = {
     hkust_intr: {
         title: 'HKUST INTR',
         cloud: 'assets/demos/hkust_intr/scene.pnt',
-        video: 'assets/demos/hkust_intr/reconstructed.mp4',
-        pointSize: 0.05,
+        density: 550000,
+        pointSize: 0.035,
         flipY: true,
         camera: { x: -0.6, y: 0.3, z: -1.4 }
     },
     hkust_toy: {
         title: 'HKUST Toy',
         cloud: 'assets/demos/hkust_toy/scene.pnt',
-        video: 'assets/demos/hkust_toy/reconstructed.mp4',
-        pointSize: 0.012,
+        density: 280000,
+        pointSize: 0.011,
         flipY: true,
         camera: { x: -0.4, y: 0.2, z: -1.5 }
     },
     hkust_redbird: {
         title: 'HKUST Red Bird',
         cloud: 'assets/demos/hkust_redbird/scene.pnt',
-        video: 'assets/demos/hkust_redbird/reconstructed.mp4',
-        pointSize: 0.14,
+        density: 400000,
+        pointSize: 0.11,
         flipY: true,
         camera: { x: -0.5, y: 0.35, z: -1.6 }
     },
     drift: {
         title: 'Drift',
         cloud: 'assets/demos/drift/scene.pnt',
-        video: 'assets/demos/drift/reconstructed.mp4',
-        pointSize: 0.3,
+        density: 320000,
+        pointSize: 0.28,
         flipY: true,
-        camera: { x: -0.5, y: 0.25, z: -1.2 }
+        camera: { x: -0.25, y: 0.25, z: -0.75 }
     },
     gta_sfm: {
         title: 'GTA SfM',
         cloud: 'assets/demos/gta_sfm/scene.pnt',
-        video: 'assets/demos/gta_sfm/reconstructed.mp4',
-        pointSize: 0.25,
+        density: 520000,
+        pointSize: 0.2,
         flipY: true,
         camera: { x: -0.4, y: 0.2, z: -1.4 }
     },
     kitti: {
         title: 'KITTI',
         cloud: 'assets/demos/kitti/scene.pnt',
-        video: 'assets/demos/kitti/reconstructed.mp4',
-        pointSize: 0.9,
+        density: 450000,
+        pointSize: 0.65,
         flipY: true,
-        camera: { x: -0.3, y: 0.25, z: -0.9 }
+        camera: { x: -0.15, y: 0.22, z: -0.5 }
     }
 };
 
 // ========================================
 // Interactive Examples
+//
+// Top panel: single 3D point cloud for the currently selected demo.
+// Bottom row: auto-looping reconstruction videos as "live thumbnails";
+// clicking one swaps the 3D cloud up top.
 // ========================================
 function initDemo() {
     const canvas = document.getElementById('demo-canvas');
     if (!canvas) return;
 
     const viewer = new PointCloudViewer(canvas, document.getElementById('demo-message'));
-    const video = document.getElementById('demo-video');
-    const cover = document.getElementById('demo-cover');
-    const coverImg = document.getElementById('demo-cover-img');
     const thumbs = document.querySelectorAll('.demo-thumb');
 
     let currentDemo = null;
-
-    function activate(key) {
+    function select(key) {
         const cfg = DEMO_CONFIGS[key];
-        if (!cfg) return;
+        if (!cfg || key === currentDemo) return;
         currentDemo = key;
-        thumbs.forEach(t => t.classList.toggle('selected', t.dataset.demo === key));
-        coverImg.src = `assets/demos/${key}/cover.jpg`;
-        video.pause();
-        video.removeAttribute('src');
-        video.load();
-        cover.classList.remove('hidden');
-
-        // Best practice: kick off network fetch as soon as the user hints at
-        // interest (thumbnail click / page load), so by the time they press
-        // play the bytes are already on-device or mid-flight.
-        viewer.prefetch(cfg);
-    }
-
-    function playDemo() {
-        if (!currentDemo) return;
-        const cfg = DEMO_CONFIGS[currentDemo];
-        cover.classList.add('hidden');
-        video.src = cfg.video;
-        video.load();
-        video.play().catch(() => {}); // autoplay blocked — user already clicked
+        thumbs.forEach(t => {
+            const isSelected = t.dataset.demo === key;
+            t.classList.toggle('selected', isSelected);
+            const v = t.querySelector('video');
+            if (!v) return;
+            if (isSelected) {
+                v.currentTime = 0;
+                v.play().catch(() => {});
+            } else {
+                v.pause();
+                v.currentTime = 0;
+            }
+        });
         viewer.show(cfg);
     }
 
     thumbs.forEach(t => {
-        t.addEventListener('click', () => {
-            const key = t.dataset.demo;
-            if (key === currentDemo) return;
-            activate(key);
-            viewer.clear();
-        });
+        t.addEventListener('click', () => select(t.dataset.demo));
     });
 
-    cover.addEventListener('click', playDemo);
-
-    activate('hkust_intr');
+    select('hkust_intr');
 }
 
 // ========================================
@@ -153,7 +147,18 @@ class PointCloudViewer {
         this.currentKey = null;
         this.pending = new Map(); // key → { promise, abort, progress }
 
+        // Measurement state
+        this.measureMode = false;
+        this.measurePoints = [];
+        this.measureMarkers = [];
+        this.measureLine = null;
+        this.measureLabel = null;
+        this.raycaster = new THREE.Raycaster();
+        this.raycaster.params.Points.threshold = 0.1;  // reset per scene at load
+        this.mouse = new THREE.Vector2();
+
         this.init();
+        this.initMeasureUI();
         this.animate();
         window.addEventListener('resize', () => this.onResize());
     }
@@ -183,6 +188,150 @@ class PointCloudViewer {
         this.controls.maxDistance = 1000;
     }
 
+    initMeasureUI() {
+        this.measureBtn = document.getElementById('measure-btn');
+        this.measureHintEl = document.getElementById('measure-hint');
+        if (this.measureBtn) {
+            this.measureBtn.addEventListener('click', () => this.toggleMeasureMode());
+        }
+        // Use pointerdown so we don't conflict with OrbitControls drag —
+        // only treat it as a measurement click if no drag happens.
+        let downAt = null;
+        this.canvas.addEventListener('pointerdown', e => {
+            downAt = { x: e.clientX, y: e.clientY };
+        });
+        this.canvas.addEventListener('pointerup', e => {
+            if (!downAt) return;
+            const dx = e.clientX - downAt.x;
+            const dy = e.clientY - downAt.y;
+            downAt = null;
+            if (Math.hypot(dx, dy) > 5) return; // was a drag, ignore
+            this.onCanvasClick(e);
+        });
+    }
+
+    toggleMeasureMode() {
+        this.measureMode = !this.measureMode;
+        if (this.measureBtn) {
+            this.measureBtn.classList.toggle('active', this.measureMode);
+            this.measureBtn.title = this.measureMode
+                ? 'Click to disable distance measurement'
+                : 'Click two points to measure distance';
+        }
+        if (this.measureHintEl) {
+            this.measureHintEl.classList.toggle('visible', this.measureMode);
+            this.measureHintEl.textContent = 'Click two points to measure distance';
+        }
+        if (!this.measureMode) this.clearMeasurement();
+        this.canvas.style.cursor = this.measureMode ? 'crosshair' : '';
+    }
+
+    onCanvasClick(event) {
+        if (!this.measureMode || !this.pointCloud) return;
+        const rect = this.canvas.getBoundingClientRect();
+        this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+        this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+        this.raycaster.setFromCamera(this.mouse, this.camera);
+        const hits = this.raycaster.intersectObject(this.pointCloud);
+        if (hits.length > 0) this.addMeasurePoint(hits[0].point.clone());
+    }
+
+    addMeasurePoint(point) {
+        if (this.measurePoints.length >= 2) this.clearMeasurement();
+        this.measurePoints.push(point);
+
+        const markerSize = Math.max(0.005, (this._sceneRadius || 1) * 0.012);
+        const geom = new THREE.SphereGeometry(markerSize, 16, 16);
+        const mat = new THREE.MeshBasicMaterial({
+            color: this.measurePoints.length === 1 ? 0x00c853 : 0xff3d00,
+            depthTest: false
+        });
+        const marker = new THREE.Mesh(geom, mat);
+        marker.renderOrder = 999;
+        marker.position.copy(point);
+        this.scene.add(marker);
+        this.measureMarkers.push(marker);
+
+        if (this.measurePoints.length === 2) {
+            this.drawMeasureLine();
+            this.showDistance();
+        }
+    }
+
+    drawMeasureLine() {
+        if (this.measureLine) {
+            this.scene.remove(this.measureLine);
+            this.measureLine.geometry.dispose();
+            this.measureLine.material.dispose();
+        }
+        const geometry = new THREE.BufferGeometry().setFromPoints(this.measurePoints);
+        const material = new THREE.LineBasicMaterial({
+            color: 0xffb300, linewidth: 2, depthTest: false
+        });
+        this.measureLine = new THREE.Line(geometry, material);
+        this.measureLine.renderOrder = 999;
+        this.scene.add(this.measureLine);
+    }
+
+    showDistance() {
+        const d = this.measurePoints[0].distanceTo(this.measurePoints[1]);
+        if (this.measureHintEl) {
+            this.measureHintEl.textContent = `Distance: ${d.toFixed(2)} (scene units)`;
+        }
+
+        if (this.measureLabel) {
+            this.scene.remove(this.measureLabel);
+            this.measureLabel.material.map?.dispose();
+            this.measureLabel.material.dispose();
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = 256; canvas.height = 64;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 28px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(d.toFixed(2), canvas.width / 2, canvas.height / 2);
+
+        const tex = new THREE.CanvasTexture(canvas);
+        const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false });
+        this.measureLabel = new THREE.Sprite(mat);
+        const mid = new THREE.Vector3().addVectors(this.measurePoints[0], this.measurePoints[1]).multiplyScalar(0.5);
+        mid.y += (this._sceneRadius || 1) * 0.05;
+        this.measureLabel.position.copy(mid);
+        const labelScale = (this._sceneRadius || 1) * 0.22;
+        this.measureLabel.scale.set(labelScale, labelScale * 0.25, 1);
+        this.measureLabel.renderOrder = 1000;
+        this.scene.add(this.measureLabel);
+    }
+
+    clearMeasurement() {
+        this.measureMarkers.forEach(m => {
+            this.scene.remove(m);
+            m.geometry.dispose();
+            m.material.dispose();
+        });
+        this.measureMarkers = [];
+        if (this.measureLine) {
+            this.scene.remove(this.measureLine);
+            this.measureLine.geometry.dispose();
+            this.measureLine.material.dispose();
+            this.measureLine = null;
+        }
+        if (this.measureLabel) {
+            this.scene.remove(this.measureLabel);
+            this.measureLabel.material.map?.dispose();
+            this.measureLabel.material.dispose();
+            this.measureLabel = null;
+        }
+        this.measurePoints = [];
+        if (this.measureHintEl && this.measureMode) {
+            this.measureHintEl.textContent = 'Click two points to measure distance';
+        }
+    }
+
     setMessage(text) {
         if (!this.messageEl) return;
         this.messageEl.textContent = text;
@@ -191,6 +340,7 @@ class PointCloudViewer {
     }
 
     clear() {
+        this.clearMeasurement();
         if (this.pointCloud) {
             this.scene.remove(this.pointCloud);
             this.pointCloud.geometry.dispose();
@@ -276,6 +426,7 @@ class PointCloudViewer {
     }
 
     buildPointCloud(geometry, cfg) {
+        this.clearMeasurement();
         if (this.pointCloud) {
             this.scene.remove(this.pointCloud);
             this.pointCloud.geometry.dispose();
@@ -294,6 +445,12 @@ class PointCloudViewer {
         geometry.translate(-center.x, -center.y, -center.z);
         geometry.computeBoundingSphere();
         const radius = geometry.boundingSphere.radius || 1;
+        this._sceneRadius = radius;
+
+        // Raycast pick tolerance scales with point size, so measurement
+        // clicks on sparse outdoor scenes (KITTI, Drift) are as forgiving
+        // as clicks on dense indoor ones (Toy, INTR).
+        this.raycaster.params.Points.threshold = cfg.pointSize * 1.5;
 
         const material = new THREE.PointsMaterial({
             size: cfg.pointSize,
