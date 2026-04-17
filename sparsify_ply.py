@@ -13,53 +13,68 @@ size ``voxel_size`` contributes one representative point (the mean of all
 source points that fell into it, in both position and colour).  The
 result looks dramatically crisper at the same point count.
 
-Output format: .pnt v3 (gzipped)
---------------------------------
-v3 is designed for *fast progressive web delivery*, not disk footprint.
-Three things change vs. v2:
+Output format: .pnt v4 (gzipped, true-streaming)
+------------------------------------------------
+v4 replaces v3's two-section coarse/fine split with a *block stream*
+so the browser can render **every** new block the moment its bytes
+land — no waiting for a second "fine" pass.  Any file prefix is a
+uniform random subsample of the scene, so early blocks already sketch
+the whole thing; later blocks fill in detail smoothly.
 
-1.  **Struct-of-Arrays layout.**  All X's, then all Y's, then Z's, then
-    R, G, B.  Uniform per-channel byte streams compress much better
-    under DEFLATE than the interleaved xyzxyz… of v2.
-2.  **Morton-ordered points.**  Points are pre-sorted on a 3-D Morton
-    curve so spatial neighbours are file-adjacent.  Adjacent uint16
-    values in the quantised streams are then nearly identical, which
-    is exactly what gzip's LZ77 thrives on — compression typically
-    doubles compared to un-sorted data.
-3.  **Two-section progressive layout.**  A small (<=80 k point)
-    *coarse* subset is placed at the front of the file; the remainder
-    follows.  The viewer renders the coarse subset as soon as it is
-    decoded (usually well under a second), then streams the fine
-    subset into the same geometry buffer over the rest of the download.
+The recipe is:
 
-On-disk layout of the uncompressed v3 payload::
+1.  Quantise positions to uint16 (same as v3).
+2.  *Randomly shuffle* the entire point cloud.  Critical: this makes
+    any prefix of the file a uniformly-distributed spatial sample —
+    the user sees the whole scene sparsely first, not one spatial
+    corner.
+3.  Split into fixed-size blocks (default 16 384 points).
+4.  *Inside each block*, Morton-sort the shuffled points.  Spatial
+    locality is recovered within the block so the byte-plane SoA
+    stream below still compresses well under DEFLATE.
+5.  Emit byte-plane SoA per block (X_lo, X_hi, Y_lo, Y_hi, Z_lo, Z_hi,
+    R, G, B), each stream ``block_count`` bytes long.
+6.  Gzip the whole payload.
 
-    offset  size       field
-    0       4          magic           "UNP3"
-    4       4          version         uint32 LE  (= 3)
-    8       4          count_total     uint32 LE  (= N)
-    12      4          count_coarse    uint32 LE  (= K <= N)
-    16      12         min_xyz         3 × float32 LE
-    28      12         scale_xyz       3 × float32 LE    # xyz = min + q * scale
-    40            — Section A (coarse prefix, K points, byte-plane SoA) —
-                K    X_lo      (low byte  of each quantised X)
-                K    X_hi      (high byte of each quantised X)
-                K    Y_lo
-                K    Y_hi
-                K    Z_lo
-                K    Z_hi
-                K    R
-                K    G
-                K    B
-    40+9K         — Section B (fine remainder, N-K points, same byte-plane SoA) —
-                N-K  X_lo, X_hi, Y_lo, Y_hi, Z_lo, Z_hi, R, G, B
+On-disk layout of the uncompressed v4 payload::
 
-Splitting each uint16 into two byte planes (low and high) is a standard
-trick for columnar numeric compression: after Morton sorting the high
-byte drifts slowly and the low byte is almost white-noise, so DEFLATE
-can match long runs in the high-byte stream while the low-byte stream
-costs roughly its raw size.  Net effect over v2 (interleaved little-
-endian uint16): typically 2–3× tighter after gzip.
+    offset  size    field
+    0       4       magic           "UNP4"
+    4       4       version         uint32 LE  (= 4)
+    8       4       count_total     uint32 LE  (= N)
+    12      4       block_size      uint32 LE  (points per full block)
+    16      4       num_blocks      uint32 LE  (= ceil(N / block_size))
+    20      12      min_xyz         3 × float32 LE
+    32      12      scale_xyz       3 × float32 LE   # xyz = min + q * scale
+    44      ...     block 0
+                    block 1
+                    ...
+                    block (num_blocks - 1)
+
+Each block is *exactly*::
+
+    bc = block_size            (for blocks 0 .. num_blocks-2)
+       = N - (num_blocks-1)*block_size   (for the last block)
+
+    bc  X_lo    (low byte of quantised X for each of bc points)
+    bc  X_hi    (high byte)
+    bc  Y_lo, Y_hi, Z_lo, Z_hi
+    bc  R, G, B
+
+``bc`` is not stored inline — the client computes it from the header,
+saving ~784 bytes over 200 blocks.  The packing is deterministic, so
+the reader can stop any time and discard a trailing partial block.
+
+Why per-block Morton (instead of global Morton + stride sample)
+---------------------------------------------------------------
+Global Morton sort gives DEFLATE the longest runs of identical high-
+bytes (~2× better compression than per-block), but any prefix then
+only covers one spatial corner of the scene — useless for progressive
+rendering.  Conversely, a pure random shuffle gives great progressive
+rendering but destroys byte-plane locality within blocks.  Shuffling
+*across* blocks then Morton-sorting *within* blocks splits the
+difference: you pay ~10-15 % on compression versus global Morton, in
+exchange for every file prefix being a uniform spatial sample.
 
 The whole payload is then run through gzip at level 9 and written to
 ``<out>.pnt.gz``.  The viewer decompresses it client-side through the
@@ -207,13 +222,15 @@ def morton_keys(qx: np.ndarray, qy: np.ndarray, qz: np.ndarray) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------
-# PNT v3 + gzip writer
+# PNT v4 + gzip writer
 # --------------------------------------------------------------------------
-def write_pnt_v3_gz(xyz: np.ndarray, rgb: np.ndarray, out_path: str,
-                    coarse_frac: float = 0.05, max_coarse: int = 80_000,
-                    min_coarse: int = 20_000, gzip_level: int = 9,
+def write_pnt_v4_gz(xyz: np.ndarray, rgb: np.ndarray, out_path: str,
+                    block_size: int = 16_384, gzip_level: int = 9,
                     seed: int = 42) -> tuple:
-    """Write v3 payload to ``out_path`` (gzipped).  Returns (raw_bytes, gz_bytes)."""
+    """Write v4 payload to ``out_path`` (gzipped).
+
+    Returns ``(raw_bytes, gz_bytes)``.
+    """
     n = int(xyz.shape[0])
     mins = xyz.min(axis=0).astype(np.float32)
     maxs = xyz.max(axis=0).astype(np.float32)
@@ -223,51 +240,44 @@ def write_pnt_v3_gz(xyz: np.ndarray, rgb: np.ndarray, out_path: str,
     q = np.clip(np.round((xyz - mins) / scale), 0, 65535).astype(np.uint16)
     qx, qy, qz = q[:, 0], q[:, 1], q[:, 2]
 
-    # Coarse prefix: a uniform random subset (so early render isn't spatially
-    # clumpy), but Morton-sorted *within* the subset so its bytes compress.
-    coarse_count = min(int(round(n * coarse_frac)), max_coarse)
-    coarse_count = max(min(n, min_coarse), coarse_count) if n >= min_coarse else n
-    coarse_count = min(coarse_count, n)
-
+    # Step 1: uniform random shuffle over all points.  Every prefix of the
+    # shuffled array is then a uniformly-distributed spatial sample of the
+    # scene — so the browser can render "everything received so far" at
+    # any moment and have it cover the whole bounding box, just sparsely.
     rng = np.random.default_rng(seed)
-    perm = rng.permutation(n)
-    coarse_idx = perm[:coarse_count]
-    fine_idx = perm[coarse_count:]
+    order = rng.permutation(n)
 
-    def morton_sort(indices):
-        if indices.size == 0:
-            return indices
-        keys = morton_keys(qx[indices], qy[indices], qz[indices])
-        return indices[np.argsort(keys, kind="stable")]
-
-    coarse_idx = morton_sort(coarse_idx)
-    fine_idx = morton_sort(fine_idx)
+    # Step 2: cut into fixed-size blocks.  The last block may be shorter.
+    num_blocks = (n + block_size - 1) // block_size
 
     buf = io.BytesIO()
-    buf.write(b"UNP3")
-    buf.write(struct.pack("<I", 3))                         # version
-    buf.write(struct.pack("<I", n))                         # total count
-    buf.write(struct.pack("<I", int(coarse_count)))         # coarse count
-    buf.write(mins.tobytes())                               # min_xyz
-    buf.write(scale.tobytes())                              # scale_xyz
+    buf.write(b"UNP4")
+    buf.write(struct.pack("<I", 4))              # version
+    buf.write(struct.pack("<I", n))              # count_total
+    buf.write(struct.pack("<I", int(block_size))) # block_size
+    buf.write(struct.pack("<I", int(num_blocks))) # num_blocks
+    buf.write(mins.tobytes())                    # min_xyz
+    buf.write(scale.tobytes())                   # scale_xyz
 
-    def write_section(indices):
-        if indices.size == 0:
-            return
-        # Byte-plane SoA: low byte then high byte, per axis.  Morton order
-        # keeps the high-byte streams very slowly varying (huge DEFLATE
-        # wins), while the low-byte streams look pseudo-random (DEFLATE
-        # basically passes them through).
+    for b in range(num_blocks):
+        s = b * block_size
+        e = min(s + block_size, n)
+        idx = order[s:e]
+
+        # Step 3: Morton-sort inside the block so within-block byte-plane
+        # SoA actually compresses.  (Without this, adjacent bytes in each
+        # SoA channel look like white noise and DEFLATE can't match them.)
+        keys = morton_keys(qx[idx], qy[idx], qz[idx])
+        idx = idx[np.argsort(keys, kind="stable")]
+
+        # Step 4: emit byte-plane SoA.
         for axis in (qx, qy, qz):
-            a = axis[indices].astype(np.uint16, copy=False)
+            a = axis[idx].astype(np.uint16, copy=False)
             buf.write((a & np.uint16(0xFF)).astype("u1").tobytes())
             buf.write((a >> np.uint16(8)).astype("u1").tobytes())
-        buf.write(rgb[indices, 0].astype("u1").tobytes())
-        buf.write(rgb[indices, 1].astype("u1").tobytes())
-        buf.write(rgb[indices, 2].astype("u1").tobytes())
-
-    write_section(coarse_idx)
-    write_section(fine_idx)
+        buf.write(rgb[idx, 0].astype("u1").tobytes())
+        buf.write(rgb[idx, 1].astype("u1").tobytes())
+        buf.write(rgb[idx, 2].astype("u1").tobytes())
 
     raw = buf.getvalue()
     with gzip.open(out_path, "wb", compresslevel=gzip_level) as gz:
@@ -287,10 +297,10 @@ def main():
                     help="approximate target point count; bisects voxel size")
     ap.add_argument("--voxel", type=float,
                     help="explicit voxel size (scene units / metres)")
-    ap.add_argument("--coarse-frac", type=float, default=0.05,
-                    help="fraction of points to place in the coarse prefix")
-    ap.add_argument("--max-coarse", type=int, default=80_000,
-                    help="cap on coarse-prefix point count")
+    ap.add_argument("--block-size", type=int, default=16_384,
+                    help="points per block in the v4 stream (smaller = "
+                         "smoother progressive render, slightly worse "
+                         "compression)")
     args = ap.parse_args()
     if (args.target is None) == (args.voxel is None):
         ap.error("provide exactly one of --target or --voxel")
@@ -304,9 +314,8 @@ def main():
     else:
         voxel, pos, col, _ = pick_voxel_size(xyz, rgb, args.target)
 
-    raw_bytes, gz_bytes = write_pnt_v3_gz(
-        pos, col, args.out_path,
-        coarse_frac=args.coarse_frac, max_coarse=args.max_coarse,
+    raw_bytes, gz_bytes = write_pnt_v4_gz(
+        pos, col, args.out_path, block_size=args.block_size,
     )
 
     src_mb = os.path.getsize(args.in_path) / 1e6

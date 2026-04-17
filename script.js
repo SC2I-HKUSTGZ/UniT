@@ -1,32 +1,48 @@
 /* ========================================
    UniT project page — interactive examples
-   Chapter nav + PNT v3 point-cloud viewer + video+cover sync
+   Chapter nav + PNT v4 point-cloud viewer + video+cover sync
 
-   Loading strategy (progressive + parallel + cached)
+   Loading strategy (true streaming + parallel + cached)
    -----------------------------------------------------
-   Each scene is served as a gzipped .pnt.gz v3 file whose payload has
-   two sections:
+   Each scene is served as a gzipped .pnt.gz v4 file.  The payload is
+   split into fixed-size blocks of 16 384 points; the entire cloud was
+   randomly shuffled before being blocked, so **any file prefix is a
+   uniform random subsample of the whole scene**.  That means:
 
-     (1) A small coarse prefix (<=80 k Morton-sorted points).  As soon
-         as the prefix bytes arrive we dequantise them, build a full-
-         sized BufferGeometry, and render the coarse cloud.  On a
-         typical connection this takes well under a second — users
-         never stare at a blank canvas.
+     - The first block rendered already spans the full bounding box —
+       the cloud looks like a sparse sketch of the real scene, not a
+       spatial corner.
+     - Each subsequent block adds more points, uniformly distributed.
+       The cloud visibly densifies in real-time as bytes arrive, all
+       the way up to full detail, with no discrete "now it refines"
+       step.
+     - If the user cancels or switches scenes mid-load, whatever
+       arrived so far is still a usable visualisation.
 
-     (2) The fine remainder.  Those bytes continue streaming through
-         the same `DecompressionStream` while the coarse cloud is
-         already interactive.  When the last byte lands, we fill the
-         remaining slots of the same geometry and update `drawRange`
-         to expose the full cloud.
+   Implementation:
+     - `DecompressionStream('gzip')` feeds a grow-doubling scratch
+       buffer.  A parser walks it block-by-block, emitting `onBlock`
+       callbacks the instant each block has fully arrived.
+     - The viewer preallocates the final-size position / colour arrays
+       on header, installs an empty geometry (drawRange=0), then
+       appends each block in place.  `BufferAttribute.updateRange`
+       batches GPU sub-uploads to just the newly-added slice per
+       animation frame — total upload over a load is ~1×N points,
+       not quadratic.
+     - The scene's centre + bounding sphere come from the header's
+       min/scale (the full-scene quantisation bbox), so the transform
+       is exact from byte 44 onward — no re-centring as more points
+       land.
 
    Other wins layered on top:
-     - `Cache API` under the name "unit-pnt-v3": first visit pays the
+     - `Cache API` under the name "unit-pnt-v4": first visit pays the
        network cost, every subsequent visit is an instant memory read.
-     - After the current scene's coarse render, we kick off *parallel*
-       prefetches of the other five scenes so subsequent clicks are
-       usually cache hits.  HTTP/2 multiplexing keeps this cheap.
-     - `<link rel="preload">` in protected.html starts the default
-       scene's fetch before any JS has executed.
+     - After the current scene's first block renders, we kick off
+       *parallel* prefetches of the other five scenes so subsequent
+       clicks are usually cache hits.  HTTP/2 multiplexing keeps this
+       cheap.
+     - `<link rel="prefetch">` tags in protected.html warm the HTTP
+       cache before any thumbnail is clicked.
    ======================================== */
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -63,54 +79,54 @@ const DEMO_CONFIGS = {
     hkust_intr: {
         title: 'HKUST INTR',
         cloud: 'assets/demos/hkust_intr/scene.pnt.gz',
-        density: 3350000,
-        pointSize: 0.014,
+        density: 3810000,
+        pointSize: 0.011,
         flipY: true,
         camera: { x: -0.6, y: 0.3, z: -1.4 }
     },
     hkust_toy: {
         title: 'HKUST Toy',
         cloud: 'assets/demos/hkust_toy/scene.pnt.gz',
-        density: 2080000,
-        pointSize: 0.0047,
+        density: 2680000,
+        pointSize: 0.0042,
         flipY: true,
         camera: { x: -0.4, y: 0.2, z: -1.5 }
     },
     hkust_redbird: {
         title: 'HKUST Red Bird',
         cloud: 'assets/demos/hkust_redbird/scene.pnt.gz',
-        density: 2150000,
-        pointSize: 0.047,
+        density: 2280000,
+        pointSize: 0.044,
         flipY: true,
         camera: { x: -0.5, y: 0.35, z: -1.6 }
     },
     drift: {
         title: 'Drift',
         cloud: 'assets/demos/drift/scene.pnt.gz',
-        density: 490000,
-        pointSize: 0.155,
+        density: 556000,
+        pointSize: 0.145,
         flipY: true,
         camera: { x: -0.25, y: 0.25, z: -0.75 }
     },
     gta_sfm: {
         title: 'GTA SfM',
         cloud: 'assets/demos/gta_sfm/scene.pnt.gz',
-        density: 3200000,
-        pointSize: 0.094,
+        density: 4070000,
+        pointSize: 0.082,
         flipY: true,
         camera: { x: -0.4, y: 0.2, z: -1.4 }
     },
     kitti: {
         title: 'KITTI',
         cloud: 'assets/demos/kitti/scene.pnt.gz',
-        density: 2570000,
-        pointSize: 0.31,
+        density: 2890000,
+        pointSize: 0.30,
         flipY: true,
         camera: { x: -0.15, y: 0.22, z: -0.5 }
     }
 };
 
-const CACHE_NAME = 'unit-pnt-v3';
+const CACHE_NAME = 'unit-pnt-v4';
 
 // ========================================
 // Interactive Examples
@@ -145,17 +161,16 @@ function initDemo() {
         viewer.show(key, cfg).then(() => schedulePrefetch(key));
     }
 
-    // Fire up to 5 parallel prefetches for the non-selected scenes after
-    // the current one's coarse render has landed.  HTTP/2 handles the
-    // multiplexing; skipping the old 500 ms serial gate means neighbours
-    // are usually warm by the time the user clicks them.
+    // Fire parallel prefetches for the non-selected scenes shortly
+    // after the current scene's load resolves.  HTTP/2 handles the
+    // multiplexing; the short delay gives the current load's trailing
+    // blocks the pipe first, then neighbours warm up in the background
+    // so later clicks hit the HTTP cache.
     function schedulePrefetch(priorityKey) {
         const conn = navigator.connection;
         if (conn && (conn.saveData || ['slow-2g', '2g'].includes(conn.effectiveType))) {
             return; // respect data-saver mode
         }
-        // Wait a tick so first-demo fine-stream bytes get the pipe first,
-        // then fan out in parallel.
         setTimeout(() => {
             if (currentDemo !== priorityKey) return;
             Object.entries(DEMO_CONFIGS).forEach(([k, cfg]) => {
@@ -179,12 +194,12 @@ function initDemo() {
 // Responsibilities:
 //   1. Fetch  .pnt.gz  (Cache API first, network fallback).
 //   2. Pipe the response body through DecompressionStream('gzip').
-//   3. Surface three milestones to the caller:
-//        - onHeader(header)                 (40 bytes in)
-//        - onCoarse(header, coarseBytes)    (header + coarse section in)
-//        - resolve with {header, bytes}     (whole payload in)
-//      Each milestone is paired with a typed-array view into a single
-//      grow-doubling Uint8Array, so there is no per-chunk copy.
+//   3. Walk the decompressed byte stream block-by-block, firing:
+//        - onHeader(header)                                    (44 bytes in)
+//        - onBlock(header, bytes, byteOffset, blockCount, blockIdx)
+//                                                              (every 9*bc bytes)
+//      Each callback receives a typed-array view into a single grow-
+//      doubling Uint8Array, so there is no per-chunk copy.
 // ========================================
 class PntLoader {
     constructor(cacheName) {
@@ -240,8 +255,8 @@ class PntLoader {
         return p;
     }
 
-    // Streaming load with milestone callbacks.
-    async load(url, { signal, onHeader, onCoarse, onProgress } = {}) {
+    // Streaming load with per-block callbacks.
+    async load(url, { signal, onHeader, onBlock, onProgress } = {}) {
         const resp = await this._fetchCompressed(url, signal);
 
         // Progress bar uses compressed-byte count when we can see it;
@@ -251,8 +266,8 @@ class PntLoader {
         const totalCompressed = parseInt(resp.headers.get('content-length') || '0', 10);
 
         // DecompressionStream yields the *uncompressed* bytes.  Chain
-        // tees for progress measurement on the compressed side so we
-        // don't double-count.
+        // a passthrough TransformStream on the compressed side so we
+        // can count bytes for progress without double-reading.
         let compressedReceived = 0;
         const progressStream = new TransformStream({
             transform(chunk, controller) {
@@ -272,7 +287,10 @@ class PntLoader {
         let buf = new Uint8Array(1 << 16);   // grow-doubling scratch
         let len = 0;
         let header = null;
-        let coarseFired = false;
+        // Byte cursor: where the next unparsed block starts.  Starts
+        // after the 44-byte header once `header` has been parsed.
+        let cursor = 0;
+        let blocksDecoded = 0;
 
         const ensureCap = (needed) => {
             if (buf.length >= needed) return;
@@ -290,73 +308,86 @@ class PntLoader {
             buf.set(value, len);
             len += value.byteLength;
 
-            // Header parse: 40 bytes.
-            if (!header && len >= 40) {
-                header = parsePntV3Header(buf.buffer, 0);
+            // Parse header once (44 bytes).
+            if (!header && len >= 44) {
+                header = parsePntV4Header(buf.buffer, 0);
+                cursor = 44;
                 if (onHeader) onHeader(header);
             }
-            // Coarse fire: header + coarse section (9 bytes/point).
-            if (header && !coarseFired) {
-                const need = 40 + header.coarseCount * 9;
-                if (len >= need) {
-                    coarseFired = true;
-                    if (onCoarse) onCoarse(header, buf, len);
-                }
+
+            // Drain as many complete blocks as have arrived since last iter.
+            while (header && blocksDecoded < header.numBlocks) {
+                const bc = (blocksDecoded < header.numBlocks - 1)
+                    ? header.blockSize
+                    : (header.count - blocksDecoded * header.blockSize);
+                const blockBytes = bc * 9;                 // SoA: 6 bytes pos + 3 bytes colour per point
+                if (len - cursor < blockBytes) break;      // block still in-flight
+                if (onBlock) onBlock(header, buf, cursor, bc, blocksDecoded);
+                cursor += blockBytes;
+                blocksDecoded++;
             }
         }
 
-        // Shrink to exact length so downstream typed-array views don't
-        // read past the real data.
         const tight = buf.subarray(0, len);
         if (onProgress) onProgress(100);
-        return { header: header ?? parsePntV3Header(tight.buffer, 0), bytes: tight };
+        return { header: header ?? parsePntV4Header(tight.buffer, 0), bytes: tight };
     }
 }
 
 
 // ========================================
-// PNT v3 parser
+// PNT v4 parser + helpers
 // ========================================
-function parsePntV3Header(buffer, offset = 0) {
-    const view = new DataView(buffer, offset, 40);
+function parsePntV4Header(buffer, offset = 0) {
+    const view = new DataView(buffer, offset, 44);
     const magic =
         String.fromCharCode(view.getUint8(0)) +
         String.fromCharCode(view.getUint8(1)) +
         String.fromCharCode(view.getUint8(2)) +
         String.fromCharCode(view.getUint8(3));
-    if (magic === 'UNPT') {
-        // v1 / v2 fall-through: signal to caller to use the legacy path.
-        return { magic, version: view.getUint32(4, true), legacy: true };
+    if (magic !== 'UNP4') {
+        throw new Error(`Not a UNP4 file (got "${magic}") — refresh to clear old cache?`);
     }
-    if (magic !== 'UNP3') throw new Error(`Not a UNP3 file (got "${magic}")`);
-    const version = view.getUint32(4, true);
-    const count = view.getUint32(8, true);
-    const coarseCount = view.getUint32(12, true);
-    const minX = view.getFloat32(16, true);
-    const minY = view.getFloat32(20, true);
-    const minZ = view.getFloat32(24, true);
-    const sx = view.getFloat32(28, true);
-    const sy = view.getFloat32(32, true);
-    const sz = view.getFloat32(36, true);
+    const version    = view.getUint32(4,  true);
+    const count      = view.getUint32(8,  true);
+    const blockSize  = view.getUint32(12, true);
+    const numBlocks  = view.getUint32(16, true);
+    const minX = view.getFloat32(20, true);
+    const minY = view.getFloat32(24, true);
+    const minZ = view.getFloat32(28, true);
+    const sx   = view.getFloat32(32, true);
+    const sy   = view.getFloat32(36, true);
+    const sz   = view.getFloat32(40, true);
     return {
-        magic, version, count, coarseCount,
-        min: [minX, minY, minZ],
+        magic, version, count, blockSize, numBlocks,
+        min:   [minX, minY, minZ],
         scale: [sx, sy, sz],
-        legacy: false
     };
 }
 
+// Derive the scene's centre-at-origin transform directly from the file
+// header.  The header's (min, scale) pair describes the exact quantised
+// bbox of the *full* cloud, so we know the centre and bounding-sphere
+// radius the moment 44 bytes arrive — no need to sample any points,
+// no "sampling error" as more blocks land.
+function computeXformFromHeader(header, cfg) {
+    const [mx, my, mz] = header.min;
+    const [sx, sy, sz] = header.scale;
+    const HALF = 32767.5;                // midpoint of the uint16 grid
+    const cx = mx + HALF * sx;
+    const cy = my + HALF * sy;
+    const cz = mz + HALF * sz;
+    const hx = HALF * sx;
+    const hy = HALF * sy;
+    const hz = HALF * sz;
+    const radius = Math.sqrt(hx * hx + hy * hy + hz * hz) || 1;
+    return { cx, cy, cz, flipY: !!cfg.flipY, radius };
+}
+
 // Translate (+ optional flipY) a contiguous slice of `positions`
-// in-place.  The centre is computed on pre-flip coordinates, so after
-// flipping the Y axis we just negate each translated Y value rather
-// than re-deriving the centre.  (Algebraic equivalence: applying
-// `y' = -(y - cy)` yields the same layout as first flipping then
-// centring on the flipped Y values.)
-//
-// Used twice per scene: once on the coarse slots as soon as they
-// decode, then on the fine slots when the full stream lands.  Both
-// calls share the SAME `xform` so the two sections end up in the same
-// coordinate frame (origin-centred, optional flipY).
+// in-place.  Algebraic identity: `(-y - (-cy_raw))` == `-(y - cy_raw)`,
+// so we can translate first (all axes) then flip Y, and still end up
+// with the same layout as "flip first, then centre on the flipped Y".
 function applyTransform(positions, start, count, xform) {
     const { cx, cy, cz, flipY } = xform;
     const end = start + count;
@@ -373,42 +404,12 @@ function applyTransform(positions, start, count, xform) {
     }
 }
 
-// Compute bounding box on `positions[start..start+count)`, derive
-// centre + bounding-sphere radius, then call `applyTransform` so the
-// slice is centred at the origin and (if `cfg.flipY`) Y-flipped.
-// Returns the `xform` so the fine pass can reuse it.
-function computeBboxAndTransform(positions, start, count, cfg) {
-    let xmin = Infinity, xmax = -Infinity;
-    let ymin = Infinity, ymax = -Infinity;
-    let zmin = Infinity, zmax = -Infinity;
-    const end = start + count;
-    for (let i = start; i < end; i++) {
-        const k = i * 3;
-        const x = positions[k], y = positions[k + 1], z = positions[k + 2];
-        if (x < xmin) xmin = x; if (x > xmax) xmax = x;
-        if (y < ymin) ymin = y; if (y > ymax) ymax = y;
-        if (z < zmin) zmin = z; if (z > zmax) zmax = z;
-    }
-    const cx = (xmin + xmax) * 0.5;
-    const cy = (ymin + ymax) * 0.5;
-    const cz = (zmin + zmax) * 0.5;
-    const hx = (xmax - xmin) * 0.5;
-    const hy = (ymax - ymin) * 0.5;
-    const hz = (zmax - zmin) * 0.5;
-    const radius = Math.sqrt(hx * hx + hy * hy + hz * hz) || 1;
-    const xform = { cx, cy, cz, flipY: !!cfg.flipY, radius };
-    applyTransform(positions, start, count, xform);
-    return xform;
-}
-
-// Decode one byte-plane SoA section (coarse or fine) into preallocated
-// Float32 position + Uint8 color slots.  `bytes` is a Uint8Array that
-// already contains the section; `byteOffset` is where the section
-// starts inside it.  `writeOffset` is the destination slot index
-// (in points) inside `positions`/`colors`.
-//
-// Returns the byte offset immediately after the section.
-function decodeSection(bytes, byteOffset, n, positions, colors, writeOffset, header) {
+// Decode one block (byte-plane SoA) into preallocated Float32 position
+// + Uint8 colour slots.  `bytes` is the grow-doubling scratch Uint8Array
+// the loader reads into; `byteOffset` is where the block starts in that
+// buffer; `writeOffset` is the *point index* where the block's points
+// should land in the geometry.
+function decodeBlock(bytes, byteOffset, n, positions, colors, writeOffset, header) {
     const base = bytes.byteOffset + byteOffset;
     const buf = bytes.buffer;
     const [mx, my, mz] = header.min;
@@ -439,7 +440,6 @@ function decodeSection(bytes, byteOffset, n, positions, colors, writeOffset, hea
         colors[colBase + k + 1] = g[i];
         colors[colBase + k + 2] = b[i];
     }
-    return byteOffset + n * 9;
 }
 
 
@@ -676,22 +676,25 @@ class PointCloudViewer {
         }
     }
 
-    // --- Progressive load + render ---------------------------------------
+    // --- True streaming load + render ------------------------------------
     //
-    // `show` runs *two* render passes for a single click:
+    // Every block the loader emits goes straight into the geometry:
     //
-    //    pass 1 (coarse):  builds the full-sized geometry, fills just
-    //                      the coarse prefix slots, sets drawRange to
-    //                      `coarseCount`, renders.  Happens as soon as
-    //                      the prefix bytes arrive (~hundreds of ms).
+    //    1. `onHeader`  installs an empty full-sized geometry.  We can
+    //       do this because `computeXformFromHeader` derives the scene's
+    //       centre and bounding-sphere radius from the file's (min, scale)
+    //       directly — no points needed.
     //
-    //    pass 2 (fine):    fills the remaining slots *in place* and
-    //                      bumps drawRange to the full count.  Happens
-    //                      when the full gzip stream has drained.
+    //    2. `onBlock`   decodes into the next `blockCount` slots of the
+    //       pre-allocated typed arrays, applies the same transform, and
+    //       marks the new slice dirty.  An rAF-batched flush commits
+    //       the dirty slice to the GPU with `BufferAttribute.updateRange`,
+    //       so each block pays a ~200 KB sub-upload instead of forcing
+    //       a whole-buffer re-upload (which would be O(N²) over N blocks).
     //
-    // If the user switches scenes mid-load we abort via AbortController
-    // and move on.  The point cloud built for the previous scene is
-    // disposed inside `clearCloud()` so GPU memory never leaks.
+    // Net effect: the cloud visibly densifies in real time as bytes
+    // arrive.  Mid-load cancellation via `AbortController` leaves the
+    // partially-rendered scene displayed until the next `show` call.
     // ---------------------------------------------------------------------
     async show(key, cfg) {
         if (this.activeKey === key && this.pointCloud) return;
@@ -703,74 +706,80 @@ class PointCloudViewer {
         this.setMessage('Loading…');
 
         // Per-scene state captured in closure so a later `show` call
-        // can't accidentally rewrite the earlier scene's buffers.
+        // can't race-write the earlier scene's buffers.
         let positions = null;
         let colors = null;
-        let builtCoarse = false;
         let xform = null;           // {cx, cy, cz, flipY, radius}
+        let writeOffset = 0;        // next unfilled point slot
+        let flushedUpTo = 0;        // slots already committed to GPU
+        let flushScheduled = false;
+        let firstBlockRendered = false;
+        const geomRef = { current: null };   // the geometry we're filling
+
+        const scheduleFlush = () => {
+            if (flushScheduled || abort.signal.aborted) return;
+            flushScheduled = true;
+            requestAnimationFrame(() => {
+                flushScheduled = false;
+                if (abort.signal.aborted || this.activeKey !== key) return;
+                const geo = geomRef.current;
+                if (!geo) return;
+                const from = flushedUpTo;
+                const to = writeOffset;
+                if (from >= to) return;
+                // Sub-upload just the newly-filled slice.  updateRange is
+                // in *scalar* units (3 floats per point for position,
+                // 3 bytes per point for colour).
+                const posAttr = geo.getAttribute('position');
+                const colAttr = geo.getAttribute('color');
+                posAttr.updateRange.offset = from * 3;
+                posAttr.updateRange.count  = (to - from) * 3;
+                posAttr.needsUpdate = true;
+                colAttr.updateRange.offset = from * 3;
+                colAttr.updateRange.count  = (to - from) * 3;
+                colAttr.needsUpdate = true;
+                geo.setDrawRange(0, to);
+                flushedUpTo = to;
+            });
+        };
 
         try {
             const onHeader = (header) => {
                 if (abort.signal.aborted) return;
-                if (header.legacy) {
-                    throw new Error(`Server returned legacy ${header.magic} v${header.version}; expected UNP3. Did the .pnt.gz redirect to .pnt?`);
-                }
                 positions = new Float32Array(header.count * 3);
                 colors    = new Uint8Array(header.count * 3);
+                xform = computeXformFromHeader(header, cfg);
+                // Install an empty geometry (drawRange=0); blocks fill it.
+                geomRef.current = this._installGeometry(
+                    positions, colors, header.count, 0, cfg, xform.radius
+                );
             };
 
-            // When coarse bytes land, decode them, compute the scene's
-            // centre/flipY/radius from *just the coarse slots*, apply
-            // those transforms in-place to the same slots, and install
-            // the geometry.  The unused fine slots stay at (0, 0, 0)
-            // but are outside `drawRange`, so they never render.  We
-            // stash `xform` so the fine pass can apply the same
-            // translation + flipY — otherwise the two sections end up
-            // in different coordinate frames and you see ghost images.
-            const onCoarse = (header, bytes) => {
+            const onBlock = (header, bytes, byteOffset, blockCount, blockIdx) => {
                 if (abort.signal.aborted) return;
-                decodeSection(bytes, 40, header.coarseCount, positions, colors, 0, header);
-                xform = computeBboxAndTransform(positions, 0, header.coarseCount, cfg);
-                this._installGeometry(positions, colors, header.count,
-                                       header.coarseCount, cfg, xform.radius);
-                builtCoarse = true;
-                this.setMessage('Refining…');
+                decodeBlock(bytes, byteOffset, blockCount, positions, colors,
+                            writeOffset, header);
+                applyTransform(positions, writeOffset, blockCount, xform);
+                writeOffset += blockCount;
+                if (!firstBlockRendered) {
+                    firstBlockRendered = true;
+                    this.setMessage('');
+                }
+                scheduleFlush();
             };
 
             const onProgress = (pct) => {
-                if (abort.signal.aborted) return;
-                if (!builtCoarse) this.setMessage(`Loading ${pct}%`);
+                if (abort.signal.aborted || firstBlockRendered) return;
+                this.setMessage(`Loading ${pct}%`);
             };
 
-            const { header, bytes } = await this.loader.load(cfg.cloud, {
-                signal: abort.signal, onHeader, onCoarse, onProgress
+            await this.loader.load(cfg.cloud, {
+                signal: abort.signal, onHeader, onBlock, onProgress
             });
             if (abort.signal.aborted || this.activeKey !== key) return;
 
-            // Pass 2: fine section, right after the coarse block in memory.
-            const fineOffset = 40 + header.coarseCount * 9;
-            const fineCount = header.count - header.coarseCount;
-            if (fineCount > 0) {
-                decodeSection(bytes, fineOffset, fineCount, positions, colors,
-                              header.coarseCount, header);
-                if (xform) {
-                    // Fine slots are still in raw file coordinates; push them
-                    // through the coarse pass's transform so both sections
-                    // share one coordinate frame.  (Skipping this is what
-                    // caused the "ghost cloud" overlay bug.)
-                    applyTransform(positions, header.coarseCount, fineCount, xform);
-                }
-            }
-            if (!builtCoarse) {
-                // Coarse milestone never fired — e.g. a tiny file where
-                // the whole payload arrived before any intermediate read
-                // boundary.  Transform everything at once and render.
-                const x = computeBboxAndTransform(positions, 0, header.count, cfg);
-                this._installGeometry(positions, colors, header.count,
-                                       header.count, cfg, x.radius);
-            } else {
-                this._extendDrawRange(header.count);
-            }
+            // Commit any residual slots that hadn't flushed yet.
+            if (writeOffset > flushedUpTo) scheduleFlush();
             this.setMessage('');
         } catch (err) {
             if (err.name === 'AbortError' || abort.signal.aborted) return;
@@ -779,11 +788,12 @@ class PointCloudViewer {
         }
     }
 
-    // Replace the current cloud with a freshly-built one.  Positions
-    // are assumed to be *already* centred + flipped by
-    // `computeBboxAndTransform` — we never call `geometry.translate()`
-    // or `computeBoundingBox()` here because those touch the unused
-    // zero slots and would corrupt fine points written later.
+    // Install an (initially empty) full-sized geometry.  Positions &
+    // colours are the pre-allocated typed arrays that blocks will fill
+    // in place.  We set `boundingSphere` explicitly from the header's
+    // known full-scene radius so three.js never re-derives it from the
+    // (still-zero) unfilled slots.  Returns the geometry so the caller
+    // can retain a reference for later updateRange plumbing.
     _installGeometry(positions, colors, totalCount, drawCount, cfg, radius) {
         this.clearCloud();
 
@@ -796,9 +806,6 @@ class PointCloudViewer {
         geometry.setAttribute('color', colAttr);
 
         geometry.setDrawRange(0, drawCount);
-        // Bounding sphere set explicitly so three.js doesn't recompute
-        // it from all positions (which include the zero-padded fine
-        // slots); frustum culling + raycasting both use this.
         geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), radius);
 
         this._sceneRadius = radius;
@@ -817,18 +824,7 @@ class PointCloudViewer {
         this.camera.position.set(radius * cam.x, radius * cam.y, radius * cam.z);
         this.controls.target.set(0, 0, 0);
         this.controls.update();
-    }
-
-    // Called after the fine section has been written *and transformed*
-    // into the existing geometry's typed arrays.  We bump the draw
-    // range and tell three.js to re-upload the position + color
-    // attributes.
-    _extendDrawRange(total) {
-        if (!this.pointCloud) return;
-        const geo = this.pointCloud.geometry;
-        geo.setDrawRange(0, total);
-        geo.getAttribute('position').needsUpdate = true;
-        geo.getAttribute('color').needsUpdate = true;
+        return geometry;
     }
 
     onResize() {
