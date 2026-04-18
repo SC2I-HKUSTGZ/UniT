@@ -1276,7 +1276,7 @@ class ViewerControls {
         bindRange('ctrl-pointsize', 'ctrl-pointsize-val', (v) => {
             this.viewer.setPointSize(v);
             this._persist({ pointSize: v });
-        }, (v) => v.toFixed(4));
+        }, (v) => v.toFixed(5));
 
         bindRange('ctrl-sampling', 'ctrl-sampling-val', (v) => {
             this.viewer.setSamplingRate(v / 100);
@@ -1340,7 +1340,7 @@ class ViewerControls {
             const lab = this._$(valId);
             if (lab && formatter) lab.textContent = formatter(value);
         };
-        set('ctrl-pointsize', 'ctrl-pointsize-val', cfg.pointSize, (v) => (+v).toFixed(4));
+        set('ctrl-pointsize', 'ctrl-pointsize-val', cfg.pointSize, (v) => (+v).toFixed(5));
         const samp = (cfg.samplingRate != null ? cfg.samplingRate : 1) * 100;
         set('ctrl-sampling', 'ctrl-sampling-val', samp, (v) => Math.round(v) + '%');
         const bright = (cfg.brightness != null ? cfg.brightness : 1);
