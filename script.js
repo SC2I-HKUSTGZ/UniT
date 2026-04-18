@@ -472,18 +472,24 @@ function computeXformFromHeader(header, cfg) {
     return { cx, cy, cz, flipY: !!cfg.flipY, radius };
 }
 
-// Translate (+ optional flipY) a contiguous slice of `positions`
-// in-place.  Algebraic identity: `(-y - (-cy_raw))` == `-(y - cy_raw)`,
-// so we can translate first (all axes) then flip Y, and still end up
-// with the same layout as "flip first, then centre on the flipped Y".
+// Translate (+ optional flipY, + unconditional flipX) a contiguous slice
+// of `positions` in-place.  Algebraic identity: `(-x - (-cx_raw))` ==
+// `-(x - cx_raw)`, so we can translate first (all axes) then flip the
+// signs, and still end up with the same layout as "flip first, then
+// centre on the flipped axis".
+//
+// The X negation is applied unconditionally because every reconstructed
+// cloud comes out horizontally mirrored relative to its reference video
+// under this pipeline's coordinate convention; flipping X after centring
+// corrects that once for every scene.
 function applyTransform(positions, start, count, xform) {
     const { cx, cy, cz, flipY } = xform;
     const end = start + count;
     for (let i = start; i < end; i++) {
         const k = i * 3;
-        positions[k]     -= cx;
-        positions[k + 1] -= cy;
-        positions[k + 2] -= cz;
+        positions[k]     = -(positions[k]     - cx);
+        positions[k + 1] -=   cy;
+        positions[k + 2] -=   cz;
     }
     if (flipY) {
         for (let i = start; i < end; i++) {
@@ -655,11 +661,14 @@ class PointCloudViewer {
             // top AWAY from the viewer — the opposite of the standard
             // "drag down ⇒ see more of the top" convention used by
             // OrbitControls.  Negate dy so the drag direction matches
-            // what the user expects.  Yaw already matches because the
-            // camera's screen-right axis aligns with world -X for these
-            // cameras, so a positive world-Y rotation reads as "scene
-            // rotated right" on screen.
-            const yawDeg   =  (dx / rect.width)  * 360;
+            // what the user expects.
+            //
+            // Yaw sign: applyTransform mirrors X unconditionally to align
+            // the cloud with its reference video, which inverts the
+            // mapping between world-Y rotation and on-screen sweep
+            // direction.  Negate dx so "drag right" still reads as
+            // "scene rotates right" after the mirror.
+            const yawDeg   = -(dx / rect.width)  * 360;
             const pitchDeg = -(dy / rect.height) * 360;
 
             const rot = this.pointCloud.rotation;
@@ -1276,7 +1285,7 @@ class ViewerControls {
         bindRange('ctrl-pointsize', 'ctrl-pointsize-val', (v) => {
             this.viewer.setPointSize(v);
             this._persist({ pointSize: v });
-        }, (v) => v.toFixed(5));
+        }, (v) => v.toFixed(6));
 
         bindRange('ctrl-sampling', 'ctrl-sampling-val', (v) => {
             this.viewer.setSamplingRate(v / 100);
@@ -1340,7 +1349,7 @@ class ViewerControls {
             const lab = this._$(valId);
             if (lab && formatter) lab.textContent = formatter(value);
         };
-        set('ctrl-pointsize', 'ctrl-pointsize-val', cfg.pointSize, (v) => (+v).toFixed(5));
+        set('ctrl-pointsize', 'ctrl-pointsize-val', cfg.pointSize, (v) => (+v).toFixed(6));
         const samp = (cfg.samplingRate != null ? cfg.samplingRate : 1) * 100;
         set('ctrl-sampling', 'ctrl-sampling-val', samp, (v) => Math.round(v) + '%');
         const bright = (cfg.brightness != null ? cfg.brightness : 1);
