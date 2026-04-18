@@ -649,8 +649,18 @@ class PointCloudViewer {
             // Full-width drag ≈ one full yaw turn; full-height ≈ one
             // pitch turn.  Matches OrbitControls' default sensitivity
             // closely enough that the interaction feels identical.
-            const yawDeg   = (dx / rect.width)  * 360;
-            const pitchDeg = (dy / rect.height) * 360;
+            //
+            // Pitch sign: the baked cameras all sit at -Z looking at the
+            // origin, so a positive world-X rotation tilts the cloud's
+            // top AWAY from the viewer — the opposite of the standard
+            // "drag down ⇒ see more of the top" convention used by
+            // OrbitControls.  Negate dy so the drag direction matches
+            // what the user expects.  Yaw already matches because the
+            // camera's screen-right axis aligns with world -X for these
+            // cameras, so a positive world-Y rotation reads as "scene
+            // rotated right" on screen.
+            const yawDeg   =  (dx / rect.width)  * 360;
+            const pitchDeg = -(dy / rect.height) * 360;
 
             const rot = this.pointCloud.rotation;
             rot.y += yawDeg   * d2r;
