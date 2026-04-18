@@ -69,62 +69,100 @@ function initNavigation() {
 // ========================================
 // Per-demo configuration
 //
-// `density` is purely informational — the actual point count is
-// determined by the header inside the .pnt.gz file.  `pointSize` is
-// tuned visually per scene so scale & density read consistently
-// across very different extents.  `camera` is the unit offset from
-// the bounding-sphere centre, scaled by the sphere radius on load.
+// Fields baked at build time (drive the initial look of each scene):
+//   cloud         — .pnt.gz path
+//   pointSize     — splat size in world units, tuned so different
+//                   scene extents read consistently
+//   flipY         — negate Y after centring (handy when the source
+//                   uses a +Y-down convention)
+//   camera        — unit offset from the bounding-sphere centre,
+//                   scaled by the sphere radius on load
+//   samplingRate  — fraction of points drawn [0..1].  Because the
+//                   .pnt.gz stream is randomly shuffled, any prefix
+//                   is a uniform spatial sample — so this is just a
+//                   drawRange cutoff, no re-sampling cost.
+//   brightness    — scalar multiplier applied to vertex colours in
+//                   the fragment shader (values > 1 are allowed;
+//                   they brighten under-exposed scans).
+//   background    — CSS colour for the canvas clear colour.
+//   rotation      — extra Euler angles (degrees, XYZ) applied to
+//                   the point cloud object; use this to straighten
+//                   scenes whose native axes aren't world-aligned.
+//
+// All of these are exposed in the live controls panel; the copy-
+// config button in that panel prints a block that can be pasted
+// back in here verbatim.
 // ========================================
 const DEMO_CONFIGS = {
     hkust_intr: {
         title: 'HKUST INTR',
         cloud: 'assets/demos/hkust_intr/scene.pnt.gz',
-        density: 3810000,
         pointSize: 0.011,
         flipY: true,
-        camera: { x: -0.6, y: 0.3, z: -1.4 }
+        camera: { x: -0.6, y: 0.3, z: -1.4 },
+        samplingRate: 1.0,
+        brightness: 1.0,
+        background: '#ffffff',
+        rotation: { x: 0, y: 0, z: 0 }
     },
     hkust_toy: {
         title: 'HKUST Toy',
         cloud: 'assets/demos/hkust_toy/scene.pnt.gz',
-        density: 2680000,
         pointSize: 0.0042,
         flipY: true,
-        camera: { x: -0.4, y: 0.2, z: -1.5 }
+        camera: { x: -0.4, y: 0.2, z: -1.5 },
+        samplingRate: 1.0,
+        brightness: 1.0,
+        background: '#ffffff',
+        rotation: { x: 0, y: 0, z: 0 }
     },
     hkust_redbird: {
         title: 'HKUST Red Bird',
         cloud: 'assets/demos/hkust_redbird/scene.pnt.gz',
-        density: 2280000,
         pointSize: 0.044,
         flipY: true,
-        camera: { x: -0.5, y: 0.35, z: -1.6 }
+        camera: { x: -0.5, y: 0.35, z: -1.6 },
+        samplingRate: 1.0,
+        brightness: 1.0,
+        background: '#ffffff',
+        rotation: { x: 0, y: 0, z: 0 }
     },
     drift: {
         title: 'Drift',
         cloud: 'assets/demos/drift/scene.pnt.gz',
-        density: 556000,
         pointSize: 0.145,
         flipY: true,
-        camera: { x: -0.25, y: 0.25, z: -0.75 }
+        camera: { x: -0.25, y: 0.25, z: -0.75 },
+        samplingRate: 1.0,
+        brightness: 1.0,
+        background: '#ffffff',
+        rotation: { x: 0, y: 0, z: 0 }
     },
     gta_sfm: {
         title: 'GTA SfM',
         cloud: 'assets/demos/gta_sfm/scene.pnt.gz',
-        density: 4070000,
         pointSize: 0.082,
         flipY: true,
-        camera: { x: -0.4, y: 0.2, z: -1.4 }
+        camera: { x: -0.4, y: 0.2, z: -1.4 },
+        samplingRate: 1.0,
+        brightness: 1.0,
+        background: '#ffffff',
+        rotation: { x: 0, y: 0, z: 0 }
     },
     kitti: {
         title: 'KITTI',
         cloud: 'assets/demos/kitti/scene.pnt.gz',
-        density: 2890000,
         pointSize: 0.30,
         flipY: true,
-        camera: { x: -0.15, y: 0.22, z: -0.5 }
+        camera: { x: -0.15, y: 0.22, z: -0.5 },
+        samplingRate: 1.0,
+        brightness: 1.0,
+        background: '#ffffff',
+        rotation: { x: 0, y: 0, z: 0 }
     }
 };
+
+const CONTROLS_STORAGE_KEY = 'unit-demo-controls-v1';
 
 const CACHE_NAME = 'unit-pnt-v4';
 
@@ -138,6 +176,7 @@ function initDemo() {
     const loader = new PntLoader(CACHE_NAME);
     const viewer = new PointCloudViewer(canvas, document.getElementById('demo-message'), loader);
     const thumbs = document.querySelectorAll('.demo-thumb');
+    const controls = new ViewerControls(viewer);
 
     let currentDemo = null;
 
@@ -158,7 +197,8 @@ function initDemo() {
                 v.currentTime = 0;
             }
         });
-        viewer.show(key, cfg).then(() => schedulePrefetch(key));
+        const resolved = controls.bind(key, cfg);
+        viewer.show(key, resolved).then(() => schedulePrefetch(key));
     }
 
     // Fire parallel prefetches for the non-selected scenes shortly
@@ -495,6 +535,10 @@ class PointCloudViewer {
         this.controls.dampingFactor = 0.08;
         this.controls.minDistance = 0.05;
         this.controls.maxDistance = 1000;
+
+        // Current scene's effective config — mutated by the controls panel.
+        this._effective = null;
+        this._totalPoints = 0;
     }
 
     initMeasureUI() {
@@ -749,6 +793,7 @@ class PointCloudViewer {
                 positions = new Float32Array(header.count * 3);
                 colors    = new Uint8Array(header.count * 3);
                 xform = computeXformFromHeader(header, cfg);
+                this._totalPoints = header.count;
                 // Install an empty geometry (drawRange=0); blocks fill it.
                 geomRef.current = this._installGeometry(
                     positions, colors, header.count, 0, cfg, xform.radius
@@ -781,11 +826,75 @@ class PointCloudViewer {
             // Commit any residual slots that hadn't flushed yet.
             if (writeOffset > flushedUpTo) scheduleFlush();
             this.setMessage('');
+            // Emit a one-shot "ready" event so external controllers (e.g.
+            // the settings panel) can sync their UI to the just-loaded
+            // scene's values.
+            if (this.onSceneReady) this.onSceneReady(key, cfg);
         } catch (err) {
             if (err.name === 'AbortError' || abort.signal.aborted) return;
             console.error('Error loading point cloud:', err);
             this.setMessage('Failed to load point cloud');
         }
+    }
+
+    // Runtime setters used by the view controls panel.  All of them no-op
+    // gracefully when there is no point cloud loaded yet (the panel can
+    // still write values; the next scene load will pick them up via cfg).
+    setPointSize(size) {
+        if (!this.pointCloud) return;
+        this.pointCloud.material.size = size;
+        this.raycaster.params.Points.threshold = size * 1.5;
+    }
+
+    setSamplingRate(rate) {
+        if (!this.pointCloud || !this._totalPoints) return;
+        const clamped = Math.max(0, Math.min(1, rate));
+        const count = Math.max(1, Math.floor(this._totalPoints * clamped));
+        this.pointCloud.geometry.setDrawRange(0, count);
+    }
+
+    setBrightness(b) {
+        if (!this.pointCloud) return;
+        const shader = this.pointCloud.material.userData?.shader;
+        if (shader && shader.uniforms.uBrightness) {
+            shader.uniforms.uBrightness.value = b;
+        }
+    }
+
+    setBackground(color) {
+        this.scene.background = new THREE.Color(color);
+    }
+
+    setRotation(rotDegrees) {
+        if (!this.pointCloud) return;
+        const d2r = Math.PI / 180;
+        this.pointCloud.rotation.set(
+            (rotDegrees.x || 0) * d2r,
+            (rotDegrees.y || 0) * d2r,
+            (rotDegrees.z || 0) * d2r
+        );
+    }
+
+    // Move the camera without re-installing the scene.  `cam` is a unit
+    // offset multiplied by the scene's bounding-sphere radius, same as
+    // the one baked into DEMO_CONFIGS.  The orbit target is reset to the
+    // origin so spin-around works as expected after the snap.
+    setCameraOffset(cam) {
+        const r = this._sceneRadius || 1;
+        this.camera.position.set(r * cam.x, r * cam.y, r * cam.z);
+        this.controls.target.set(0, 0, 0);
+        this.controls.update();
+    }
+
+    // Capture the current camera as unit offsets ({x, y, z} divided by
+    // radius), suitable for pasting back into DEMO_CONFIGS.camera.
+    getCameraOffset() {
+        const r = this._sceneRadius || 1;
+        return {
+            x: this.camera.position.x / r,
+            y: this.camera.position.y / r,
+            z: this.camera.position.z / r
+        };
     }
 
     // Install an (initially empty) full-sized geometry.  Positions &
@@ -817,8 +926,62 @@ class PointCloudViewer {
             sizeAttenuation: true
         });
 
+        // Inject a brightness uniform into the fragment shader.  We keep
+        // a reference to the compiled Shader object so the controls panel
+        // can update `uBrightness` live without a full material rebuild.
+        // Values > 1 are allowed — they map to over-exposure, which is
+        // exactly what under-lit scans need to read well on a white page.
+        const initialBrightness = (cfg.brightness != null) ? cfg.brightness : 1.0;
+        material.userData.uBrightness = { value: initialBrightness };
+        material.onBeforeCompile = (shader) => {
+            shader.uniforms.uBrightness = material.userData.uBrightness;
+            shader.fragmentShader = shader.fragmentShader
+                .replace(
+                    'void main() {',
+                    'uniform float uBrightness;\nvoid main() {'
+                )
+                .replace(
+                    '#include <output_fragment>',
+                    '#include <output_fragment>\n\tgl_FragColor.rgb *= uBrightness;'
+                );
+            material.userData.shader = shader;
+        };
+
         this.pointCloud = new THREE.Points(geometry, material);
+
+        // Apply scene rotation (straightens crooked captures).  Stored in
+        // degrees in the config for human-readability; Three.js wants rad.
+        const rot = cfg.rotation || { x: 0, y: 0, z: 0 };
+        const d2r = Math.PI / 180;
+        this.pointCloud.rotation.set(
+            (rot.x || 0) * d2r, (rot.y || 0) * d2r, (rot.z || 0) * d2r
+        );
+
+        // Points' raycast() iterates the full positions buffer regardless
+        // of drawRange, which means measurements snap to hidden points
+        // when sampling < 100%.  Wrap it to respect drawRange.count.
+        const originalRaycast = this.pointCloud.raycast.bind(this.pointCloud);
+        this.pointCloud.raycast = (raycaster, intersects) => {
+            const drawCount = geometry.drawRange.count;
+            if (drawCount === Infinity || drawCount >= totalCount) {
+                return originalRaycast(raycaster, intersects);
+            }
+            const before = intersects.length;
+            originalRaycast(raycaster, intersects);
+            // Filter out hits beyond drawRange — original is out-of-order
+            // (by distance), so we keep only intersections whose index is
+            // inside the drawn prefix.
+            for (let i = intersects.length - 1; i >= before; i--) {
+                if (intersects[i].index >= drawCount) intersects.splice(i, 1);
+            }
+        };
+
         this.scene.add(this.pointCloud);
+
+        // Apply background override if provided (default: white).
+        if (cfg.background) {
+            this.scene.background = new THREE.Color(cfg.background);
+        }
 
         const cam = cfg.camera || { x: -0.5, y: 0.3, z: -1.5 };
         this.camera.position.set(radius * cam.x, radius * cam.y, radius * cam.z);
@@ -839,5 +1002,239 @@ class PointCloudViewer {
         requestAnimationFrame(() => this.animate());
         this.controls.update();
         this.renderer.render(this.scene, this.camera);
+    }
+}
+
+
+// ========================================
+// ViewerControls — MeshLab-style settings panel
+//
+// Owns the UI for tweaking point size, sampling rate, brightness,
+// background, scene rotation, and the initial camera offset.  All
+// values are persisted per-scene in localStorage so a user's tweaks
+// survive reloads.  The "Copy config" button dumps the current state
+// as a JSON block that can be pasted straight back into DEMO_CONFIGS.
+// ========================================
+class ViewerControls {
+    constructor(viewer) {
+        this.viewer = viewer;
+        this.currentKey = null;
+        this.currentCfg = null;
+        this.overrides = this._loadAll();
+
+        this.panel  = document.getElementById('demo-controls-panel');
+        this.toggle = document.getElementById('controls-toggle-btn');
+
+        // Bail silently if the panel markup isn't present (e.g. on an old
+        // cached protected.html); the viewer still runs, just without the
+        // settings UI.
+        if (!this.panel || !this.toggle) return;
+
+        this._bindInputs();
+        this._bindButtons();
+
+        this.toggle.addEventListener('click', () => this._togglePanel());
+        const closeBtn = document.getElementById('controls-close');
+        if (closeBtn) closeBtn.addEventListener('click', () => this._togglePanel(false));
+    }
+
+    // Called by initDemo before `viewer.show()`.  Merges baked config
+    // with any saved per-scene overrides and returns the effective cfg
+    // that the viewer should render with.  Also refreshes the panel so
+    // its inputs reflect the resolved values.
+    bind(key, cfg) {
+        this.currentKey = key;
+        const effective = this._merge(cfg, this.overrides[key]);
+        this.currentCfg = effective;
+        this._syncInputs(effective);
+        return effective;
+    }
+
+    _merge(base, override) {
+        if (!override) return { ...base };
+        const merged = { ...base, ...override };
+        // Deep-merge the two nested objects so partial overrides work.
+        merged.camera   = { ...(base.camera   || {}), ...(override.camera   || {}) };
+        merged.rotation = { ...(base.rotation || {}), ...(override.rotation || {}) };
+        return merged;
+    }
+
+    _loadAll() {
+        try {
+            const raw = localStorage.getItem(CONTROLS_STORAGE_KEY);
+            return raw ? JSON.parse(raw) : {};
+        } catch { return {}; }
+    }
+
+    _saveAll() {
+        try { localStorage.setItem(CONTROLS_STORAGE_KEY, JSON.stringify(this.overrides)); }
+        catch {}
+    }
+
+    // Record a per-scene tweak and persist.  The override layers on top
+    // of the baked cfg so future page loads of that scene re-apply it.
+    _persist(patch) {
+        if (!this.currentKey) return;
+        const prev = this.overrides[this.currentKey] || {};
+        this.overrides[this.currentKey] = { ...prev, ...patch };
+        this._saveAll();
+        // Also update the live effective cfg so getCurrentConfig() is
+        // coherent for the "Copy config" button.
+        Object.assign(this.currentCfg, patch);
+    }
+
+    _togglePanel(force) {
+        const want = (force != null) ? force : !this.panel.classList.contains('open');
+        this.panel.classList.toggle('open', want);
+        this.toggle.classList.toggle('active', want);
+    }
+
+    _$(id) { return document.getElementById(id); }
+
+    _bindInputs() {
+        const bindRange = (id, labelId, onChange, formatter) => {
+            const el = this._$(id);
+            const lab = this._$(labelId);
+            if (!el) return;
+            el.addEventListener('input', () => {
+                const v = parseFloat(el.value);
+                if (lab) lab.textContent = formatter(v);
+                onChange(v);
+            });
+        };
+
+        bindRange('ctrl-pointsize', 'ctrl-pointsize-val', (v) => {
+            this.viewer.setPointSize(v);
+            this._persist({ pointSize: v });
+        }, (v) => v.toFixed(3));
+
+        bindRange('ctrl-sampling', 'ctrl-sampling-val', (v) => {
+            this.viewer.setSamplingRate(v / 100);
+            this._persist({ samplingRate: v / 100 });
+        }, (v) => Math.round(v) + '%');
+
+        bindRange('ctrl-brightness', 'ctrl-brightness-val', (v) => {
+            this.viewer.setBrightness(v);
+            this._persist({ brightness: v });
+        }, (v) => v.toFixed(2) + '×');
+
+        const bindRot = (axis) => {
+            const el = this._$(`ctrl-rot-${axis}`);
+            const lab = this._$(`ctrl-rot-${axis}-val`);
+            if (!el) return;
+            el.addEventListener('input', () => {
+                const v = parseFloat(el.value);
+                if (lab) lab.textContent = v + '°';
+                const rot = { ...(this.currentCfg?.rotation || { x: 0, y: 0, z: 0 }) };
+                rot[axis] = v;
+                this.viewer.setRotation(rot);
+                this._persist({ rotation: rot });
+            });
+        };
+        bindRot('x'); bindRot('y'); bindRot('z');
+
+        const bgRow = this._$('ctrl-bg-swatches');
+        if (bgRow) {
+            bgRow.querySelectorAll('.bg-swatch').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const bg = btn.dataset.bg;
+                    bgRow.querySelectorAll('.bg-swatch').forEach(b => b.classList.toggle('selected', b === btn));
+                    this.viewer.setBackground(bg);
+                    this._persist({ background: bg });
+                });
+            });
+        }
+    }
+
+    _bindButtons() {
+        const reset = this._$('ctrl-reset');
+        if (reset) reset.addEventListener('click', () => this._resetCurrent());
+
+        const capture = this._$('ctrl-capture-cam');
+        if (capture) capture.addEventListener('click', () => {
+            const cam = this.viewer.getCameraOffset();
+            this._persist({ camera: cam });
+            // Visual confirmation without a modal.
+            capture.textContent = 'Camera captured ✓';
+            setTimeout(() => { capture.textContent = 'Use Current Camera'; }, 1500);
+        });
+
+        const copy = this._$('ctrl-copy');
+        if (copy) copy.addEventListener('click', () => this._copyConfig(copy));
+    }
+
+    _syncInputs(cfg) {
+        const set = (id, valId, value, formatter) => {
+            const el = this._$(id); if (!el) return;
+            el.value = value;
+            const lab = this._$(valId);
+            if (lab && formatter) lab.textContent = formatter(value);
+        };
+        set('ctrl-pointsize', 'ctrl-pointsize-val', cfg.pointSize, (v) => (+v).toFixed(3));
+        const samp = (cfg.samplingRate != null ? cfg.samplingRate : 1) * 100;
+        set('ctrl-sampling', 'ctrl-sampling-val', samp, (v) => Math.round(v) + '%');
+        const bright = (cfg.brightness != null ? cfg.brightness : 1);
+        set('ctrl-brightness', 'ctrl-brightness-val', bright, (v) => (+v).toFixed(2) + '×');
+        const rot = cfg.rotation || { x: 0, y: 0, z: 0 };
+        set('ctrl-rot-x', 'ctrl-rot-x-val', rot.x || 0, (v) => v + '°');
+        set('ctrl-rot-y', 'ctrl-rot-y-val', rot.y || 0, (v) => v + '°');
+        set('ctrl-rot-z', 'ctrl-rot-z-val', rot.z || 0, (v) => v + '°');
+
+        const bgRow = this._$('ctrl-bg-swatches');
+        if (bgRow) {
+            const current = (cfg.background || '#ffffff').toLowerCase();
+            bgRow.querySelectorAll('.bg-swatch').forEach(b => {
+                b.classList.toggle('selected', b.dataset.bg.toLowerCase() === current);
+            });
+        }
+    }
+
+    _resetCurrent() {
+        if (!this.currentKey) return;
+        delete this.overrides[this.currentKey];
+        this._saveAll();
+        const baked = DEMO_CONFIGS[this.currentKey];
+        if (!baked) return;
+        this.currentCfg = { ...baked,
+            camera:   { ...baked.camera },
+            rotation: { ...baked.rotation }
+        };
+        this._syncInputs(this.currentCfg);
+        // Push all values back into the viewer so the scene snaps to its
+        // baked defaults in one action.
+        this.viewer.setPointSize(baked.pointSize);
+        this.viewer.setSamplingRate(baked.samplingRate != null ? baked.samplingRate : 1);
+        this.viewer.setBrightness(baked.brightness != null ? baked.brightness : 1);
+        this.viewer.setBackground(baked.background || '#ffffff');
+        this.viewer.setRotation(baked.rotation || { x: 0, y: 0, z: 0 });
+        this.viewer.setCameraOffset(baked.camera);
+    }
+
+    _copyConfig(btn) {
+        if (!this.currentCfg || !this.currentKey) return;
+        const cfg = this.currentCfg;
+        const cam = this.viewer.getCameraOffset();
+        const lines = [
+            `${this.currentKey}: {`,
+            `    title: ${JSON.stringify(cfg.title || this.currentKey)},`,
+            `    cloud: ${JSON.stringify(cfg.cloud)},`,
+            `    pointSize: ${(+cfg.pointSize).toFixed(4)},`,
+            `    flipY: ${!!cfg.flipY},`,
+            `    camera: { x: ${cam.x.toFixed(3)}, y: ${cam.y.toFixed(3)}, z: ${cam.z.toFixed(3)} },`,
+            `    samplingRate: ${(+(cfg.samplingRate ?? 1)).toFixed(3)},`,
+            `    brightness: ${(+(cfg.brightness ?? 1)).toFixed(2)},`,
+            `    background: ${JSON.stringify(cfg.background || '#ffffff')},`,
+            `    rotation: { x: ${+(cfg.rotation?.x || 0)}, y: ${+(cfg.rotation?.y || 0)}, z: ${+(cfg.rotation?.z || 0)} }`,
+            `}`
+        ];
+        const text = lines.join('\n');
+        navigator.clipboard.writeText(text).then(() => {
+            btn.textContent = 'Copied ✓';
+            setTimeout(() => { btn.textContent = 'Copy Config'; }, 1500);
+        }).catch(() => {
+            // Clipboard API can fail in non-secure contexts; show inline.
+            const box = this._$('ctrl-copy-output');
+            if (box) { box.textContent = text; box.style.display = 'block'; }
+        });
     }
 }
