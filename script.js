@@ -661,14 +661,12 @@ class PointCloudViewer {
             // top AWAY from the viewer — the opposite of the standard
             // "drag down ⇒ see more of the top" convention used by
             // OrbitControls.  Negate dy so the drag direction matches
-            // what the user expects.
-            //
-            // Yaw sign: applyTransform mirrors X unconditionally to align
-            // the cloud with its reference video, which inverts the
-            // mapping between world-Y rotation and on-screen sweep
-            // direction.  Negate dx so "drag right" still reads as
-            // "scene rotates right" after the mirror.
-            const yawDeg   = -(dx / rect.width)  * 360;
+            // what the user expects.  Yaw already matches because the
+            // rotation axis and angular direction in world space are
+            // unchanged by applyTransform's X mirror, so a positive
+            // world-Y rotation still reads as "scene rotated right" on
+            // screen.
+            const yawDeg   =  (dx / rect.width)  * 360;
             const pitchDeg = -(dy / rect.height) * 360;
 
             const rot = this.pointCloud.rotation;
