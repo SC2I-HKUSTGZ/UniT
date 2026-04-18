@@ -931,6 +931,13 @@ class PointCloudViewer {
         // can update `uBrightness` live without a full material rebuild.
         // Values > 1 are allowed — they map to over-exposure, which is
         // exactly what under-lit scans need to read well on a white page.
+        //
+        // Anchor the injection at `#include <tonemapping_fragment>` rather
+        // than `#include <output_fragment>`: r128's points_frag writes
+        // `gl_FragColor` inline (no output_fragment chunk exists), so the
+        // older anchor silently no-ops.  Splicing in right before the
+        // tonemapping pass also means the multiplier is applied in linear
+        // space, which is the correct order for exposure-style scaling.
         const initialBrightness = (cfg.brightness != null) ? cfg.brightness : 1.0;
         material.userData.uBrightness = { value: initialBrightness };
         material.onBeforeCompile = (shader) => {
@@ -941,8 +948,8 @@ class PointCloudViewer {
                     'uniform float uBrightness;\nvoid main() {'
                 )
                 .replace(
-                    '#include <output_fragment>',
-                    '#include <output_fragment>\n\tgl_FragColor.rgb *= uBrightness;'
+                    '#include <tonemapping_fragment>',
+                    'gl_FragColor.rgb *= uBrightness;\n\t#include <tonemapping_fragment>'
                 );
             material.userData.shader = shader;
         };

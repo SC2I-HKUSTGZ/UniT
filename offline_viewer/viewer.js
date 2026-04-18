@@ -374,7 +374,12 @@
 
         // Shader tweak: uniform brightness + ambient boost (biases dark
         // pixels toward a user-set floor, like turning on an ambient
-        // lamp without needing normals).
+        // lamp without needing normals).  Anchor the injection at
+        // `<tonemapping_fragment>` rather than `<output_fragment>` —
+        // r128's points_frag writes `gl_FragColor` inline, so the older
+        // anchor would silently no-op.  Splicing before tonemapping
+        // keeps the scaling in linear space, which is the right order
+        // for exposure-like adjustments.
         material.userData.uBrightness = { value: params.brightness };
         material.userData.uAmbient = { value: params.ambient };
         material.onBeforeCompile = (shader) => {
@@ -386,11 +391,11 @@
                     'uniform float uBrightness;\nuniform float uAmbient;\nvoid main() {'
                 )
                 .replace(
-                    '#include <output_fragment>',
-                    '#include <output_fragment>\n\t' +
+                    '#include <tonemapping_fragment>',
                     'vec3 col = gl_FragColor.rgb * uBrightness;\n\t' +
                     'col = col + (vec3(1.0) - col) * uAmbient;\n\t' +
-                    'gl_FragColor.rgb = col;'
+                    'gl_FragColor.rgb = col;\n\t' +
+                    '#include <tonemapping_fragment>'
                 );
             material.userData.shader = shader;
         };
