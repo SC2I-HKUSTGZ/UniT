@@ -189,16 +189,64 @@ function initDemo() {
             t.classList.toggle('selected', isSelected);
             const v = t.querySelector('video');
             if (!v) return;
-            if (isSelected) {
-                v.currentTime = 0;
-                v.play().catch(() => {});
-            } else {
-                v.pause();
-                v.currentTime = 0;
-            }
+            if (isSelected) focusThumbVideo(v);
+            else            blurThumbVideo(v);
         });
         const resolved = controls.bind(key, cfg);
         viewer.show(key, resolved).then(() => schedulePrefetch(key));
+    }
+
+    // Start (or resume) autoplay on the currently-focused thumbnail.
+    // Three independent things can defer playback here:
+    //   1. `preload="metadata"` keeps the off-screen thumbs light, so
+    //      the first play() call can fire before a single frame has
+    //      been decoded — retry on loadeddata/canplay covers that.
+    //   2. Chrome's muted-autoplay policy suspends playback whenever
+    //      the element is outside the viewport, even if play() was
+    //      previously invoked.  The thumbnails live well below the
+    //      fold, so on first load the select() call lands before the
+    //      user has scrolled to them.  An IntersectionObserver kicks
+    //      play() again each time the selected thumb becomes visible.
+    //   3. Chrome also pauses media when the tab is hidden.  When the
+    //      user comes back (visibilitychange → "visible"), re-arm the
+    //      currently-selected thumb so it resumes looping.
+    const tryPlay = (v) => {
+        if (!v || !v.paused) return;
+        const p = v.play();
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+    };
+    const getSelectedVideo = () => {
+        const sel = document.querySelector('.demo-thumb.selected video');
+        return sel || null;
+    };
+    const thumbVisibility = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+            if (!entry.isIntersecting) continue;
+            const v = entry.target;
+            const thumb = v.closest('.demo-thumb');
+            if (thumb && thumb.classList.contains('selected')) tryPlay(v);
+        }
+    }, { threshold: 0.1 });
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') tryPlay(getSelectedVideo());
+    });
+
+    function focusThumbVideo(v) {
+        if (v.preload !== 'auto') v.preload = 'auto';
+        const start = () => {
+            try { v.currentTime = 0; } catch {}
+            tryPlay(v);
+        };
+        start();                                            // kick off loading + play
+        v.addEventListener('loadeddata', start, { once: true });
+        v.addEventListener('canplay',    start, { once: true });
+        thumbVisibility.observe(v);
+    }
+
+    function blurThumbVideo(v) {
+        thumbVisibility.unobserve(v);
+        v.pause();
+        try { v.currentTime = 0; } catch {}
     }
 
     // Fire parallel prefetches for the non-selected scenes shortly
@@ -535,10 +583,96 @@ class PointCloudViewer {
         this.controls.dampingFactor = 0.08;
         this.controls.minDistance = 0.05;
         this.controls.maxDistance = 1000;
+        // Orbiting the camera is disabled: dragging rotates the point
+        // cloud itself (see _installRotateDrag), so the X/Y/Z rotation
+        // values shown in the controls panel always match the on-screen
+        // orientation.  Zoom (wheel) and pan (right-click) stay on
+        // OrbitControls since they don't affect that invariant.
+        this.controls.enableRotate = false;
+
+        // Callback invoked whenever drag-rotation updates the cloud's
+        // orientation; ViewerControls wires this up to keep its sliders
+        // in sync.  Signature: ({x, y, z}) in degrees, each wrapped to
+        // [-180, 180] and rounded to match the slider step.
+        this.onRotationChanged = null;
 
         // Current scene's effective config — mutated by the controls panel.
         this._effective = null;
         this._totalPoints = 0;
+
+        this._installRotateDrag();
+    }
+
+    // Custom drag-to-rotate: left-button drag over the canvas rotates
+    // the point cloud directly, so the effective orientation is always
+    // reflected back in the Pitch/Yaw/Roll sliders without a quaternion
+    // round-trip.  Horizontal drag adds to the Y (yaw) angle, vertical
+    // drag adds to the X (pitch) angle; Z (roll) is only touchable via
+    // the slider.  Euler angles compose in the object's local frame,
+    // which matches how setRotation() from the sliders drives the scene
+    // so the two controls stay in exact lockstep.
+    _installRotateDrag() {
+        let dragging = false;
+        let pid = null;
+        let lastX = 0, lastY = 0;
+        let startX = 0, startY = 0;
+        let moved = false;
+        const THRESH = 5; // px before drag becomes a rotation
+
+        const d2r = Math.PI / 180;
+        const r2d = 180 / Math.PI;
+        const wrap = (deg) => Math.round(((deg + 180) % 360 + 360) % 360 - 180);
+
+        this.canvas.addEventListener('pointerdown', (e) => {
+            if (e.button !== 0) return;          // left / primary only
+            if (!this.pointCloud) return;
+            dragging = true;
+            pid = e.pointerId;
+            startX = lastX = e.clientX;
+            startY = lastY = e.clientY;
+            moved = false;
+            try { this.canvas.setPointerCapture(pid); } catch {}
+        });
+
+        this.canvas.addEventListener('pointermove', (e) => {
+            if (!dragging || e.pointerId !== pid || !this.pointCloud) return;
+            if (!moved) {
+                if (Math.hypot(e.clientX - startX, e.clientY - startY) < THRESH) return;
+                moved = true;
+            }
+            const dx = e.clientX - lastX;
+            const dy = e.clientY - lastY;
+            lastX = e.clientX;
+            lastY = e.clientY;
+
+            const rect = this.canvas.getBoundingClientRect();
+            // Full-width drag ≈ one full yaw turn; full-height ≈ one
+            // pitch turn.  Matches OrbitControls' default sensitivity
+            // closely enough that the interaction feels identical.
+            const yawDeg   = (dx / rect.width)  * 360;
+            const pitchDeg = (dy / rect.height) * 360;
+
+            const rot = this.pointCloud.rotation;
+            rot.y += yawDeg   * d2r;
+            rot.x += pitchDeg * d2r;
+
+            if (this.onRotationChanged) {
+                this.onRotationChanged({
+                    x: wrap(rot.x * r2d),
+                    y: wrap(rot.y * r2d),
+                    z: wrap(rot.z * r2d)
+                });
+            }
+        });
+
+        const end = (e) => {
+            if (!dragging || e.pointerId !== pid) return;
+            dragging = false;
+            try { this.canvas.releasePointerCapture(pid); } catch {}
+            pid = null;
+        };
+        this.canvas.addEventListener('pointerup', end);
+        this.canvas.addEventListener('pointercancel', end);
     }
 
     initMeasureUI() {
@@ -1040,9 +1174,28 @@ class ViewerControls {
         this._bindInputs();
         this._bindButtons();
 
+        // Keep the Pitch/Yaw/Roll sliders in lockstep with mouse-drag
+        // rotation: whenever the viewer rotates the cloud via drag, we
+        // write the new degrees back into the inputs, their labels, and
+        // localStorage so Copy Config and the next page load both see
+        // the drag-imparted orientation.
+        this.viewer.onRotationChanged = (rot) => this._onViewerRotated(rot);
+
         this.toggle.addEventListener('click', () => this._togglePanel());
         const closeBtn = document.getElementById('controls-close');
         if (closeBtn) closeBtn.addEventListener('click', () => this._togglePanel(false));
+    }
+
+    _onViewerRotated(rot) {
+        if (!this.currentCfg) return;
+        const set = (id, valId, value) => {
+            const el = this._$(id); if (el) el.value = value;
+            const lab = this._$(valId); if (lab) lab.textContent = value + '°';
+        };
+        set('ctrl-rot-x', 'ctrl-rot-x-val', rot.x);
+        set('ctrl-rot-y', 'ctrl-rot-y-val', rot.y);
+        set('ctrl-rot-z', 'ctrl-rot-z-val', rot.z);
+        this._persist({ rotation: { x: rot.x, y: rot.y, z: rot.z } });
     }
 
     // Called by initDemo before `viewer.show()`.  Merges baked config
@@ -1113,7 +1266,7 @@ class ViewerControls {
         bindRange('ctrl-pointsize', 'ctrl-pointsize-val', (v) => {
             this.viewer.setPointSize(v);
             this._persist({ pointSize: v });
-        }, (v) => v.toFixed(3));
+        }, (v) => v.toFixed(4));
 
         bindRange('ctrl-sampling', 'ctrl-sampling-val', (v) => {
             this.viewer.setSamplingRate(v / 100);
@@ -1162,8 +1315,8 @@ class ViewerControls {
             const cam = this.viewer.getCameraOffset();
             this._persist({ camera: cam });
             // Visual confirmation without a modal.
-            capture.textContent = 'Camera captured ✓';
-            setTimeout(() => { capture.textContent = 'Use Current Camera'; }, 1500);
+            capture.textContent = 'Initial view saved ✓';
+            setTimeout(() => { capture.textContent = 'Save as Initial View'; }, 1500);
         });
 
         const copy = this._$('ctrl-copy');
@@ -1177,7 +1330,7 @@ class ViewerControls {
             const lab = this._$(valId);
             if (lab && formatter) lab.textContent = formatter(value);
         };
-        set('ctrl-pointsize', 'ctrl-pointsize-val', cfg.pointSize, (v) => (+v).toFixed(3));
+        set('ctrl-pointsize', 'ctrl-pointsize-val', cfg.pointSize, (v) => (+v).toFixed(4));
         const samp = (cfg.samplingRate != null ? cfg.samplingRate : 1) * 100;
         set('ctrl-sampling', 'ctrl-sampling-val', samp, (v) => Math.round(v) + '%');
         const bright = (cfg.brightness != null ? cfg.brightness : 1);
