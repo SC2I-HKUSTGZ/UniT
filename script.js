@@ -95,7 +95,7 @@ function initNavigation() {
 // ========================================
 const DEMO_CONFIGS = {
     hkust_intr: {
-        title: 'HKUST INTR',
+        title: 'HKUST (GZ) INTR',
         cloud: 'assets/demos/hkust_intr/scene.pnt.gz',
         pointSize: 0.011,
         flipY: true,
@@ -106,7 +106,7 @@ const DEMO_CONFIGS = {
         rotation: { x: 0, y: 0, z: 0 }
     },
     hkust_toy: {
-        title: 'HKUST Toy',
+        title: 'HKUST (GZ) Toy',
         cloud: 'assets/demos/hkust_toy/scene.pnt.gz',
         pointSize: 0.0042,
         flipY: true,
@@ -117,7 +117,7 @@ const DEMO_CONFIGS = {
         rotation: { x: 0, y: 0, z: 0 }
     },
     hkust_redbird: {
-        title: 'HKUST Red Bird',
+        title: 'HKUST (GZ) Red Bird',
         cloud: 'assets/demos/hkust_redbird/scene.pnt.gz',
         pointSize: 0.044,
         flipY: true,
