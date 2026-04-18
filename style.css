@@ -458,6 +458,254 @@ sup {
     display: block;
 }
 
+/* ============================================================
+   View controls panel — MeshLab-style live tweaks (point size,
+   sampling rate, brightness, background, scene rotation, camera).
+   Lives as an overlay inside the demo panel so the 3D canvas stays
+   interactive even while the user drags sliders.
+   ============================================================ */
+
+.controls-toggle {
+    position: absolute;
+    top: 12px;
+    right: 62px;
+    z-index: 10;
+    width: 42px;
+    height: 42px;
+    border: none;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.94);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    cursor: pointer;
+    font-size: 20px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: transform 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.controls-toggle:hover {
+    background: #fff;
+    transform: scale(1.05);
+}
+
+.controls-toggle.active {
+    background: #1a73e8;
+    color: #fff;
+}
+
+.demo-controls-panel {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 280px;
+    max-width: calc(100% - 24px);
+    max-height: calc(100% - 24px);
+    z-index: 20;
+    background: rgba(255, 255, 255, 0.97);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    border-radius: 12px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+    display: none;
+    flex-direction: column;
+    overflow: hidden;
+    font-size: 0.82em;
+}
+
+.demo-controls-panel.open {
+    display: flex;
+}
+
+.controls-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+    font-weight: 500;
+    color: #202124;
+    background: rgba(255, 255, 255, 0.7);
+}
+
+.controls-header button {
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    font-size: 22px;
+    line-height: 1;
+    color: #5f6368;
+    padding: 2px 6px;
+    border-radius: 6px;
+    transition: background 0.15s;
+}
+
+.controls-header button:hover {
+    background: rgba(0, 0, 0, 0.06);
+    color: #202124;
+}
+
+.controls-body {
+    padding: 12px 14px 14px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.control-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.control-label {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-weight: 500;
+    color: #3c4043;
+}
+
+.control-value {
+    font-family: 'Roboto Mono', monospace;
+    font-size: 0.9em;
+    color: #5f6368;
+    min-width: 46px;
+    text-align: right;
+}
+
+.control-group input[type=range] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 4px;
+    background: #dadce0;
+    border-radius: 2px;
+    outline: none;
+    margin: 4px 0;
+}
+
+.control-group input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #1a73e8;
+    cursor: pointer;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.control-group input[type=range]::-moz-range-thumb {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #1a73e8;
+    cursor: pointer;
+    border: none;
+}
+
+.sub-control {
+    display: grid;
+    grid-template-columns: 60px 1fr 44px;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.92em;
+    color: #5f6368;
+}
+
+.sub-control input[type=range] {
+    width: 100%;
+    margin: 2px 0;
+}
+
+.bg-swatches {
+    display: flex;
+    gap: 8px;
+}
+
+.bg-swatch {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 2px solid rgba(0, 0, 0, 0.12);
+    cursor: pointer;
+    padding: 0;
+    transition: transform 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.bg-swatch:hover {
+    transform: scale(1.08);
+}
+
+.bg-swatch.selected {
+    border-color: #1a73e8;
+    box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.25);
+}
+
+.control-buttons {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-top: 4px;
+}
+
+.ctrl-btn {
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid rgba(0, 0, 0, 0.12);
+    background: #fff;
+    font-size: 0.92em;
+    font-family: inherit;
+    font-weight: 500;
+    color: #3c4043;
+    cursor: pointer;
+    transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.ctrl-btn:hover {
+    background: #f1f3f4;
+}
+
+.ctrl-btn-primary {
+    grid-column: span 2;
+    background: #1a73e8;
+    border-color: #1a73e8;
+    color: #fff;
+}
+
+.ctrl-btn-primary:hover {
+    background: #185abc;
+}
+
+.ctrl-btn-ghost {
+    color: #5f6368;
+}
+
+.ctrl-copy-output {
+    margin-top: 6px;
+    padding: 10px;
+    background: #f8f9fa;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    border-radius: 8px;
+    font-size: 0.78em;
+    font-family: 'Roboto Mono', monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: #3c4043;
+}
+
+@media (max-width: 800px) {
+    .demo-controls-panel {
+        width: calc(100% - 24px);
+    }
+    .controls-toggle {
+        right: 58px;
+    }
+}
+
 #canvas {
     display: block;
     position: absolute;

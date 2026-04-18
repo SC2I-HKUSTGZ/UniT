@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UniT Offline Point Cloud Viewer</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🔮</text></svg>">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Roboto+Mono&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header class="top-bar">
+        <div class="brand">
+            <span class="logo">🔮</span>
+            <div class="brand-text">
+                <h1>UniT Offline Viewer</h1>
+                <p>MeshLab-style live tuning for PLY &amp; PNT point clouds — everything runs locally in this tab.</p>
+            </div>
+        </div>
+        <div class="top-actions">
+            <label class="file-btn" for="file-input">
+                <input type="file" id="file-input" accept=".ply,.pnt,.pnt.gz,.gz" multiple>
+                <span>Open PLY…</span>
+            </label>
+            <button id="clear-btn" class="ghost-btn" title="Clear the current scene">Clear</button>
+        </div>
+    </header>
+
+    <main class="viewer-wrap">
+        <aside class="side-panel">
+            <section class="panel-section">
+                <h2>Scene</h2>
+                <div id="scene-info" class="scene-info">
+                    <p class="hint">Drop a <code>.ply</code> file anywhere on the viewer, or click <strong>Open PLY…</strong>.</p>
+                </div>
+                <ul id="file-list" class="file-list"></ul>
+            </section>
+
+            <section class="panel-section">
+                <h2>Display</h2>
+                <div class="control-group">
+                    <div class="control-label">
+                        <span>Point size</span>
+                        <span class="control-value" id="ctrl-pointsize-val">0.050</span>
+                    </div>
+                    <input type="range" id="ctrl-pointsize" min="0.0005" max="2.0" step="0.0005" value="0.05">
+                </div>
+                <div class="control-group">
+                    <div class="control-label">
+                        <span>Sampling rate</span>
+                        <span class="control-value" id="ctrl-sampling-val">100%</span>
+                    </div>
+                    <input type="range" id="ctrl-sampling" min="1" max="100" step="1" value="100">
+                </div>
+                <div class="control-group">
+                    <div class="control-label">
+                        <span>Brightness</span>
+                        <span class="control-value" id="ctrl-brightness-val">1.00×</span>
+                    </div>
+                    <input type="range" id="ctrl-brightness" min="0.3" max="3.0" step="0.05" value="1.0">
+                </div>
+                <div class="control-group">
+                    <div class="control-label">
+                        <span>Ambient boost</span>
+                        <span class="control-value" id="ctrl-ambient-val">0.10</span>
+                    </div>
+                    <input type="range" id="ctrl-ambient" min="0" max="1.0" step="0.02" value="0.10">
+                </div>
+                <div class="control-group">
+                    <div class="control-label">
+                        <span>Point opacity</span>
+                        <span class="control-value" id="ctrl-opacity-val">1.00</span>
+                    </div>
+                    <input type="range" id="ctrl-opacity" min="0.1" max="1.0" step="0.02" value="1.0">
+                </div>
+                <div class="control-group">
+                    <div class="control-label"><span>Background</span></div>
+                    <div id="ctrl-bg-swatches" class="bg-swatches">
+                        <button type="button" class="bg-swatch selected" data-bg="#ffffff" style="background:#ffffff" title="White"></button>
+                        <button type="button" class="bg-swatch" data-bg="#f1f3f4" style="background:#f1f3f4" title="Light grey"></button>
+                        <button type="button" class="bg-swatch" data-bg="#1f1f1f" style="background:#1f1f1f" title="Dark grey"></button>
+                        <button type="button" class="bg-swatch" data-bg="#000000" style="background:#000000" title="Black"></button>
+                    </div>
+                </div>
+            </section>
+
+            <section class="panel-section">
+                <h2>Orientation</h2>
+                <div class="sub-control">
+                    <span>Pitch (X)</span>
+                    <input type="range" id="ctrl-rot-x" min="-180" max="180" step="1" value="0">
+                    <span class="control-value" id="ctrl-rot-x-val">0°</span>
+                </div>
+                <div class="sub-control">
+                    <span>Yaw (Y)</span>
+                    <input type="range" id="ctrl-rot-y" min="-180" max="180" step="1" value="0">
+                    <span class="control-value" id="ctrl-rot-y-val">0°</span>
+                </div>
+                <div class="sub-control">
+                    <span>Roll (Z)</span>
+                    <input type="range" id="ctrl-rot-z" min="-180" max="180" step="1" value="0">
+                    <span class="control-value" id="ctrl-rot-z-val">0°</span>
+                </div>
+                <label class="checkbox">
+                    <input type="checkbox" id="ctrl-flipy">
+                    <span>Flip Y axis</span>
+                </label>
+            </section>
+
+            <section class="panel-section">
+                <h2>Camera</h2>
+                <p class="hint">Values are unit offsets from the scene's bounding-sphere centre. <strong>Use current camera</strong> reads them back from your orbit.</p>
+                <div class="cam-row">
+                    <label>X <input type="number" id="ctrl-cam-x" step="0.01" value="-0.5"></label>
+                    <label>Y <input type="number" id="ctrl-cam-y" step="0.01" value="0.3"></label>
+                    <label>Z <input type="number" id="ctrl-cam-z" step="0.01" value="-1.5"></label>
+                </div>
+                <div class="control-group">
+                    <div class="control-label">
+                        <span>Field of view</span>
+                        <span class="control-value" id="ctrl-fov-val">55°</span>
+                    </div>
+                    <input type="range" id="ctrl-fov" min="20" max="110" step="1" value="55">
+                </div>
+                <div class="button-row">
+                    <button type="button" id="ctrl-apply-cam" class="ctrl-btn">Apply camera</button>
+                    <button type="button" id="ctrl-capture-cam" class="ctrl-btn">Use current</button>
+                </div>
+            </section>
+
+            <section class="panel-section">
+                <h2>Export</h2>
+                <div class="button-row">
+                    <button type="button" id="ctrl-reset" class="ctrl-btn ctrl-btn-ghost">Reset all</button>
+                    <button type="button" id="ctrl-copy" class="ctrl-btn ctrl-btn-primary">Copy Config</button>
+                </div>
+                <pre id="ctrl-copy-output" class="ctrl-copy-output" aria-live="polite"></pre>
+            </section>
+        </aside>
+
+        <div class="canvas-wrap" id="canvas-wrap">
+            <canvas id="viewer-canvas"></canvas>
+            <div id="viewer-hint" class="viewer-hint">
+                <div class="hint-card">
+                    <h3>Drop a .ply here</h3>
+                    <p>Or use <strong>Open PLY…</strong> in the top bar. Multiple files queue in the sidebar — click to switch.</p>
+                </div>
+            </div>
+            <div id="viewer-status" class="viewer-status"></div>
+        </div>
+    </main>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="viewer.js"></script>
+</body>
+</html>
