@@ -164,7 +164,7 @@ const DEMO_CONFIGS = {
 
 const CONTROLS_STORAGE_KEY = 'unit-demo-controls-v1';
 
-const CACHE_NAME = 'unit-pnt-v6';
+const CACHE_NAME = 'unit-pnt-v7';
 
 // ========================================
 // Interactive Examples
