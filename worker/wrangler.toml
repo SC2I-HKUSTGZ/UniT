@@ -1,0 +1,12 @@
+name = "unit-demo-config"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# Bound KV namespace where the config JSON lives.
+[[kv_namespaces]]
+binding = "CONFIG"
+id = "8589564768304051998bd8c047355405"
+
+# ADMIN_SECRET is a Worker secret, set via:
+#   npx wrangler secret put ADMIN_SECRET
+# (or through the dashboard).  Never commit the value to the repo.

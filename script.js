@@ -47,7 +47,7 @@
 
 document.addEventListener('DOMContentLoaded', () => {
     initNavigation();
-    initDemo();
+    initDemo();   // fires its own applyRemoteConfig() before first render
 });
 
 // ========================================
@@ -239,12 +239,49 @@ const CONTROLS_STORAGE_KEY = 'unit-demo-controls-v2';
 
 const CACHE_NAME = 'unit-pnt-v10';
 
+// Small Cloudflare Worker (in webpage/worker/) that stores the current
+// per-scene initial view as a single JSON blob in Workers KV.  Source of
+// truth for the baked defaults once deployed — every page load fetches
+// this on top of DEMO_CONFIGS, and admins (URL ?setting=<secret>) can
+// POST new values from the "Save as Initial View" button.
+const CONFIG_WORKER_URL = 'https://unit-demo-config.enceladus-huang.workers.dev';
+
+// Fetch the remote config and mutate DEMO_CONFIGS in place so every
+// later baked-config read sees the live values.  Failures fall through
+// silently — the page still renders with the hard-coded defaults.
+async function applyRemoteConfig() {
+    try {
+        const resp = await fetch(CONFIG_WORKER_URL + '/config', { cache: 'no-store' });
+        if (!resp.ok) return;
+        const remote = await resp.json();
+        if (!remote || typeof remote !== 'object') return;
+        for (const [key, patch] of Object.entries(remote)) {
+            if (!DEMO_CONFIGS[key] || !patch || typeof patch !== 'object') continue;
+            const baked = DEMO_CONFIGS[key];
+            DEMO_CONFIGS[key] = {
+                ...baked,
+                ...patch,
+                camera:   { ...(baked.camera   || {}), ...(patch.camera   || {}) },
+                rotation: { ...(baked.rotation || {}), ...(patch.rotation || {}) },
+            };
+        }
+    } catch { /* network error — continue with baked defaults */ }
+}
+
 // ========================================
 // Interactive Examples
 // ========================================
-function initDemo() {
+async function initDemo() {
     const canvas = document.getElementById('demo-canvas');
     if (!canvas) return;
+
+    // Pull live baked config from the Worker before we instantiate
+    // anything that reads DEMO_CONFIGS.  Capped at 3 s so a slow
+    // Worker never blocks the page indefinitely.
+    await Promise.race([
+        applyRemoteConfig(),
+        new Promise(r => setTimeout(r, 3000)),
+    ]);
 
     const loader = new PntLoader(CACHE_NAME);
     const viewer = new PointCloudViewer(canvas, document.getElementById('demo-message'), loader);
@@ -1434,16 +1471,67 @@ class ViewerControls {
         if (reset) reset.addEventListener('click', () => this._resetCurrent());
 
         const capture = this._$('ctrl-capture-cam');
-        if (capture) capture.addEventListener('click', () => {
-            const cam = this.viewer.getCameraOffset();
-            this._persist({ camera: cam });
-            // Visual confirmation without a modal.
-            capture.textContent = 'Initial view saved ✓';
-            setTimeout(() => { capture.textContent = 'Save as Initial View'; }, 1500);
-        });
+        if (capture) capture.addEventListener('click', () => this._saveInitialView(capture));
 
         const copy = this._$('ctrl-copy');
         if (copy) copy.addEventListener('click', () => this._copyConfig(copy));
+    }
+
+    // Snapshot the effective config for every scene and POST it to the
+    // Worker.  The ?setting=<secret> query param doubles as the admin
+    // key: it both unlocks the settings panel and authenticates the
+    // write.  A scene's effective config is DEMO_CONFIGS[key] deep-
+    // merged with this.overrides[key], plus the live camera for the
+    // currently-viewed scene (which the sliders don't touch).
+    async _saveInitialView(btn) {
+        const secret = new URLSearchParams(window.location.search).get('setting');
+        if (!secret) {
+            // Panel wouldn't be visible without ?setting, but guard anyway.
+            btn.textContent = 'Admin mode required';
+            setTimeout(() => { btn.textContent = 'Save as Initial View'; }, 1800);
+            return;
+        }
+        // Fold the live camera into the current scene's override slot so
+        // it's picked up by the payload builder below.
+        if (this.currentKey && this.viewer && this.viewer.pointCloud) {
+            const cam = this.viewer.getCameraOffset();
+            const prev = this.overrides[this.currentKey] || {};
+            this.overrides[this.currentKey] = {
+                ...prev,
+                camera: { ...(prev.camera || {}), ...cam },
+            };
+            this._saveAll();
+            Object.assign(this.currentCfg.camera, cam);
+        }
+        const payload = {};
+        for (const [key, baked] of Object.entries(DEMO_CONFIGS)) {
+            const override = this.overrides[key] || {};
+            payload[key] = {
+                pointSize:    override.pointSize    != null ? override.pointSize    : baked.pointSize,
+                samplingRate: override.samplingRate != null ? override.samplingRate : baked.samplingRate,
+                brightness:   override.brightness   != null ? override.brightness   : baked.brightness,
+                background:   override.background   != null ? override.background   : baked.background,
+                camera:   { ...(baked.camera   || {}), ...(override.camera   || {}) },
+                rotation: { ...(baked.rotation || {}), ...(override.rotation || {}) },
+            };
+        }
+        btn.textContent = 'Saving…';
+        btn.disabled = true;
+        let status = 0;
+        try {
+            const resp = await fetch(CONFIG_WORKER_URL + '/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Admin-Key': secret },
+                body: JSON.stringify(payload),
+            });
+            status = resp.status;
+            if (!resp.ok) throw new Error('HTTP ' + status);
+            btn.textContent = 'Initial view saved ✓';
+        } catch (e) {
+            btn.textContent = status === 401 ? 'Bad secret' : 'Save failed';
+        }
+        btn.disabled = false;
+        setTimeout(() => { btn.textContent = 'Save as Initial View'; }, 1800);
     }
 
     _syncInputs(cfg) {
