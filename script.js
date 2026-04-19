@@ -93,72 +93,143 @@ function initNavigation() {
 // config button in that panel prints a block that can be pasted
 // back in here verbatim.
 // ========================================
+// ----- Previous tuned defaults — kept commented for quick restoration. -----
+// const DEMO_CONFIGS = {
+//     hkust_intr: {
+//         title: 'HKUST (GZ) INTR',
+//         cloud: 'assets/demos/hkust_intr/scene.pnt.gz',
+//         pointSize: 0.011,
+//         flipY: true,
+//         camera: { x: -0.6, y: 0.3, z: -1.4 },
+//         samplingRate: 1.0,
+//         brightness: 1.0,
+//         background: '#ffffff',
+//         rotation: { x: 0, y: 0, z: 0 }
+//     },
+//     hkust_toy: {
+//         title: 'HKUST (GZ) Toy',
+//         cloud: 'assets/demos/hkust_toy/scene.pnt.gz',
+//         pointSize: 0.0042,
+//         flipY: true,
+//         camera: { x: -0.4, y: 0.2, z: -1.5 },
+//         samplingRate: 1.0,
+//         brightness: 1.0,
+//         background: '#ffffff',
+//         rotation: { x: 0, y: 0, z: 0 }
+//     },
+//     hkust_redbird: {
+//         title: 'HKUST (GZ) Red Bird',
+//         cloud: 'assets/demos/hkust_redbird/scene.pnt.gz',
+//         pointSize: 0.044,
+//         flipY: true,
+//         camera: { x: -0.5, y: 0.35, z: -1.6 },
+//         samplingRate: 1.0,
+//         brightness: 1.0,
+//         background: '#ffffff',
+//         rotation: { x: 0, y: 0, z: 0 }
+//     },
+//     drift: {
+//         title: 'Drift',
+//         cloud: 'assets/demos/drift/scene.pnt.gz',
+//         pointSize: 0.145,
+//         flipY: true,
+//         camera: { x: -0.25, y: 0.25, z: -0.75 },
+//         samplingRate: 1.0,
+//         brightness: 1.0,
+//         background: '#ffffff',
+//         rotation: { x: 0, y: 0, z: 0 }
+//     },
+//     gta_sfm: {
+//         title: 'GTA SfM',
+//         cloud: 'assets/demos/gta_sfm/scene.pnt.gz',
+//         pointSize: 0.082,
+//         flipY: true,
+//         camera: { x: -0.4, y: 0.2, z: -1.4 },
+//         samplingRate: 1.0,
+//         brightness: 1.0,
+//         background: '#ffffff',
+//         rotation: { x: 0, y: 0, z: 0 }
+//     },
+//     kitti: {
+//         title: 'KITTI',
+//         cloud: 'assets/demos/kitti/scene.pnt.gz',
+//         pointSize: 0.30,
+//         flipY: true,
+//         camera: { x: -0.15, y: 0.22, z: -0.5 },
+//         samplingRate: 1.0,
+//         brightness: 1.0,
+//         background: '#ffffff',
+//         rotation: { x: 0, y: 0, z: 0 }
+//     }
+// };
+
+// Hard-coded from ply_config.txt — initial viewer settings per scene.
 const DEMO_CONFIGS = {
     hkust_intr: {
         title: 'HKUST (GZ) INTR',
         cloud: 'assets/demos/hkust_intr/scene.pnt.gz',
-        pointSize: 0.011,
+        pointSize: 0.012007,
         flipY: true,
-        camera: { x: -0.6, y: 0.3, z: -1.4 },
-        samplingRate: 1.0,
-        brightness: 1.0,
+        camera: { x: -0.489, y: 0.244, z: -1.140 },
+        samplingRate: 1.000,
+        brightness: 1.00,
         background: '#ffffff',
-        rotation: { x: 0, y: 0, z: 0 }
+        rotation: { x: 3, y: 25, z: 0 }
     },
     hkust_toy: {
         title: 'HKUST (GZ) Toy',
         cloud: 'assets/demos/hkust_toy/scene.pnt.gz',
-        pointSize: 0.0042,
+        pointSize: 0.000001,
         flipY: true,
-        camera: { x: -0.4, y: 0.2, z: -1.5 },
-        samplingRate: 1.0,
-        brightness: 1.0,
+        camera: { x: -0.400, y: 0.200, z: -1.500 },
+        samplingRate: 1.000,
+        brightness: 1.00,
         background: '#ffffff',
-        rotation: { x: 0, y: 0, z: 0 }
+        rotation: { x: 10, y: 12, z: 0 }
     },
     hkust_redbird: {
         title: 'HKUST (GZ) Red Bird',
         cloud: 'assets/demos/hkust_redbird/scene.pnt.gz',
-        pointSize: 0.044,
+        pointSize: 0.0000,
         flipY: true,
-        camera: { x: -0.5, y: 0.35, z: -1.6 },
-        samplingRate: 1.0,
-        brightness: 1.0,
+        camera: { x: -0.349, y: 0.244, z: -1.117 },
+        samplingRate: 0.800,
+        brightness: 1.00,
         background: '#ffffff',
-        rotation: { x: 0, y: 0, z: 0 }
+        rotation: { x: -3, y: 43, z: 0 }
     },
     drift: {
         title: 'Drift',
         cloud: 'assets/demos/drift/scene.pnt.gz',
-        pointSize: 0.145,
+        pointSize: 0.000001,
         flipY: true,
-        camera: { x: -0.25, y: 0.25, z: -0.75 },
-        samplingRate: 1.0,
-        brightness: 1.0,
+        camera: { x: -0.250, y: 0.250, z: -0.750 },
+        samplingRate: 0.800,
+        brightness: 1.00,
         background: '#ffffff',
-        rotation: { x: 0, y: 0, z: 0 }
+        rotation: { x: -16, y: -46, z: 0 }
     },
     gta_sfm: {
         title: 'GTA SfM',
         cloud: 'assets/demos/gta_sfm/scene.pnt.gz',
-        pointSize: 0.082,
+        pointSize: 0.000001,
         flipY: true,
-        camera: { x: -0.4, y: 0.2, z: -1.4 },
-        samplingRate: 1.0,
-        brightness: 1.0,
+        camera: { x: -0.361, y: 0.180, z: -1.263 },
+        samplingRate: 0.800,
+        brightness: 1.00,
         background: '#ffffff',
-        rotation: { x: 0, y: 0, z: 0 }
+        rotation: { x: -23, y: 4, z: 0 }
     },
     kitti: {
         title: 'KITTI',
         cloud: 'assets/demos/kitti/scene.pnt.gz',
-        pointSize: 0.30,
+        pointSize: 0.103814,
         flipY: true,
-        camera: { x: -0.15, y: 0.22, z: -0.5 },
-        samplingRate: 1.0,
-        brightness: 1.0,
+        camera: { x: -0.308, y: 0.451, z: -1.025 },
+        samplingRate: 0.980,
+        brightness: 1.00,
         background: '#ffffff',
-        rotation: { x: 0, y: 0, z: 0 }
+        rotation: { x: 23, y: 10, z: 0 }
     }
 };
 
