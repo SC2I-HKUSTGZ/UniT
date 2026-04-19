@@ -752,7 +752,15 @@ class PointCloudViewer {
         this.raycaster.setFromCamera(this.mouse, this.camera);
         const hits = this.raycaster.intersectObject(this.pointCloud);
         this.raycaster.params.Points.threshold = prevThreshold;
-        if (hits.length > 0) this.addMeasurePoint(hits[0].point.clone());
+        // Raycaster returns the hit in world space. Convert to the point
+        // cloud's local frame so markers parented to `this.pointCloud`
+        // track the cloud when it rotates — otherwise a later drag leaves
+        // the markers floating at their original world position while the
+        // points they were anchored to move away.
+        if (hits.length > 0) {
+            const local = this.pointCloud.worldToLocal(hits[0].point.clone());
+            this.addMeasurePoint(local);
+        }
     }
 
     addMeasurePoint(point) {
@@ -772,8 +780,8 @@ class PointCloudViewer {
         halo.position.copy(point);
         core.renderOrder = 1001;
         halo.renderOrder = 1000;
-        this.scene.add(halo);
-        this.scene.add(core);
+        this.pointCloud.add(halo);
+        this.pointCloud.add(core);
         this.measureMarkers.push(halo, core);
 
         if (this.measurePoints.length === 2) {
@@ -784,7 +792,7 @@ class PointCloudViewer {
 
     drawMeasureLine() {
         if (this.measureLine) {
-            this.scene.remove(this.measureLine);
+            this.measureLine.parent?.remove(this.measureLine);
             this.measureLine.geometry.dispose();
             this.measureLine.material.dispose();
         }
@@ -795,7 +803,7 @@ class PointCloudViewer {
         });
         this.measureLine = new THREE.Line(geometry, material);
         this.measureLine.renderOrder = 999;
-        this.scene.add(this.measureLine);
+        this.pointCloud.add(this.measureLine);
     }
 
     showDistance() {
@@ -806,7 +814,7 @@ class PointCloudViewer {
         }
 
         if (this.measureLabel) {
-            this.scene.remove(this.measureLabel);
+            this.measureLabel.parent?.remove(this.measureLabel);
             this.measureLabel.material.map?.dispose();
             this.measureLabel.material.dispose();
         }
@@ -843,24 +851,24 @@ class PointCloudViewer {
         const s = (this._sceneRadius || 1) * 0.18;
         this.measureLabel.scale.set(s, s * (96 / 320), 1);
         this.measureLabel.renderOrder = 1002;
-        this.scene.add(this.measureLabel);
+        this.pointCloud.add(this.measureLabel);
     }
 
     clearMeasurement() {
         this.measureMarkers.forEach(m => {
-            this.scene.remove(m);
+            m.parent?.remove(m);
             m.geometry.dispose();
             m.material.dispose();
         });
         this.measureMarkers = [];
         if (this.measureLine) {
-            this.scene.remove(this.measureLine);
+            this.measureLine.parent?.remove(this.measureLine);
             this.measureLine.geometry.dispose();
             this.measureLine.material.dispose();
             this.measureLine = null;
         }
         if (this.measureLabel) {
-            this.scene.remove(this.measureLabel);
+            this.measureLabel.parent?.remove(this.measureLabel);
             this.measureLabel.material.map?.dispose();
             this.measureLabel.material.dispose();
             this.measureLabel = null;
