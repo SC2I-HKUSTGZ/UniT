@@ -233,7 +233,9 @@ const DEMO_CONFIGS = {
     }
 };
 
-const CONTROLS_STORAGE_KEY = 'unit-demo-controls-v1';
+// Bumped to v2 so existing per-user overrides from the old baked
+// defaults are discarded in favour of the new DEMO_CONFIGS values.
+const CONTROLS_STORAGE_KEY = 'unit-demo-controls-v2';
 
 const CACHE_NAME = 'unit-pnt-v10';
 
