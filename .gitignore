@@ -1,3 +1,5 @@
 source_assets/
 protected.html
 encrypt.py
+worker/.wrangler/
+worker/node_modules/
