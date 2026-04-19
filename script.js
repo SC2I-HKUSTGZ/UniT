@@ -1286,6 +1286,14 @@ class ViewerControls {
         // settings UI.
         if (!this.panel || !this.toggle) return;
 
+        // Gate the settings UI behind a ?setting query param.  Regular
+        // visitors never see the gear icon; admins tweaking initial views
+        // append ?setting (or ?setting=1) to the URL to unlock the panel.
+        if (!new URLSearchParams(window.location.search).has('setting')) {
+            this.toggle.style.display = 'none';
+            return;
+        }
+
         this._bindInputs();
         this._bindButtons();
 
