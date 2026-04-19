@@ -164,7 +164,7 @@ const DEMO_CONFIGS = {
 
 const CONTROLS_STORAGE_KEY = 'unit-demo-controls-v1';
 
-const CACHE_NAME = 'unit-pnt-v9';
+const CACHE_NAME = 'unit-pnt-v10';
 
 // ========================================
 // Interactive Examples
@@ -733,8 +733,25 @@ class PointCloudViewer {
         const rect = this.canvas.getBoundingClientRect();
         this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+        // Force matrices up-to-date before raycasting: the drag handler
+        // mutates pointCloud.rotation outside the render loop, and a click
+        // can land between frames (before renderer.render() refreshes
+        // matrixWorld).  Without this the raycaster silently samples a
+        // stale transform and misses every point.
+        this.camera.updateMatrixWorld();
+        this.pointCloud.updateMatrixWorld();
+        // Widen the raycast threshold for the click path so aim-precision
+        // doesn't have to match the rendered pixel size.  The render-side
+        // threshold stays at pointSize × 1.5 (set in _installGeometry /
+        // setPointSize).  ~1% of the scene radius gives the user a few
+        // CSS pixels of click slack on every scene scale.
+        const prevThreshold = this.raycaster.params.Points.threshold;
+        this.raycaster.params.Points.threshold = Math.max(
+            prevThreshold, (this._sceneRadius || 1) * 0.01
+        );
         this.raycaster.setFromCamera(this.mouse, this.camera);
         const hits = this.raycaster.intersectObject(this.pointCloud);
+        this.raycaster.params.Points.threshold = prevThreshold;
         if (hits.length > 0) this.addMeasurePoint(hits[0].point.clone());
     }
 
