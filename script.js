@@ -47,8 +47,71 @@
 
 document.addEventListener('DOMContentLoaded', () => {
     initNavigation();
-    initDemo();   // fires its own applyRemoteConfig() before first render
+    initIntroVideo();   // lazy-loads intro.mp4 only when it scrolls into view
+    evictStaleCaches(); // removes unit-pnt-v1..v9, frees up to ~1.5 GB per user
+    initDemo();         // non-blocking: starts loading the default scene immediately
 });
+
+// ========================================
+// Intro video — lazy load
+//
+// protected.html ships the intro video with `preload="none"` so the
+// 18 MB mp4 doesn't race the 55 MB default point cloud at page load.
+// Flip it to `auto` + call play() only once the element is within the
+// viewport.  In practice the intro is above the fold, so this fires
+// within the first few hundred ms of page load — but *after* the
+// viewer has already started streaming its cloud.
+// ========================================
+function initIntroVideo() {
+    const v = document.getElementById('intro-video');
+    if (!v) return;
+    // Once the video enters the viewport, nudge preload to "auto" so
+    // browsers that treat `preload="none" autoplay` as a no-op (Safari)
+    // still start playback.  We intentionally do NOT call v.load() — that
+    // resets currentTime and forces a re-fetch even if Chrome has already
+    // begun loading via the intrinsic autoplay path.  Just flipping
+    // preload + calling play() is the minimum work needed.
+    const arm = () => {
+        if (v.preload !== 'auto') v.preload = 'auto';
+        if (v.paused) {
+            const p = v.play();
+            if (p && typeof p.catch === 'function') p.catch(() => {});
+        }
+    };
+    if ('IntersectionObserver' in window) {
+        const io = new IntersectionObserver((entries, obs) => {
+            for (const e of entries) {
+                if (!e.isIntersecting) continue;
+                obs.disconnect();
+                arm();
+            }
+        }, { threshold: 0.1 });
+        io.observe(v);
+    } else {
+        // Older browser — just arm it after the viewer has a head start.
+        setTimeout(arm, 800);
+    }
+}
+
+// ========================================
+// Cache eviction
+//
+// The Cache API name embeds a version number (unit-pnt-vN) that we bump
+// whenever .pnt.gz on disk changes format or geometry.  Without explicit
+// cleanup, every bump leaks up to ~175 MB of stale cache per user (the
+// old entries still live under the old cache name forever).  On startup,
+// delete every unit-pnt-* cache that isn't the current one.
+// ========================================
+function evictStaleCaches() {
+    if (!('caches' in self)) return;
+    caches.keys().then(names => {
+        for (const n of names) {
+            if (n.startsWith('unit-pnt-') && n !== CACHE_NAME) {
+                caches.delete(n).catch(() => {});
+            }
+        }
+    }).catch(() => {});
+}
 
 // ========================================
 // Navigation (Chapters)
@@ -247,14 +310,17 @@ const CACHE_NAME = 'unit-pnt-v10';
 const CONFIG_WORKER_URL = 'https://unit-demo-config.enceladus-huang.workers.dev';
 
 // Fetch the remote config and mutate DEMO_CONFIGS in place so every
-// later baked-config read sees the live values.  Failures fall through
+// later baked-config read sees the live values.  Returns the list of
+// keys that were actually patched so callers can re-apply them to the
+// live viewer without touching unrelated scenes.  Failures fall through
 // silently — the page still renders with the hard-coded defaults.
 async function applyRemoteConfig() {
     try {
         const resp = await fetch(CONFIG_WORKER_URL + '/config', { cache: 'no-store' });
-        if (!resp.ok) return;
+        if (!resp.ok) return [];
         const remote = await resp.json();
-        if (!remote || typeof remote !== 'object') return;
+        if (!remote || typeof remote !== 'object') return [];
+        const patched = [];
         for (const [key, patch] of Object.entries(remote)) {
             if (!DEMO_CONFIGS[key] || !patch || typeof patch !== 'object') continue;
             const baked = DEMO_CONFIGS[key];
@@ -264,8 +330,10 @@ async function applyRemoteConfig() {
                 camera:   { ...(baked.camera   || {}), ...(patch.camera   || {}) },
                 rotation: { ...(baked.rotation || {}), ...(patch.rotation || {}) },
             };
+            patched.push(key);
         }
-    } catch { /* network error — continue with baked defaults */ }
+        return patched;
+    } catch { /* network error — continue with baked defaults */ return []; }
 }
 
 // ========================================
@@ -275,13 +343,14 @@ async function initDemo() {
     const canvas = document.getElementById('demo-canvas');
     if (!canvas) return;
 
-    // Pull live baked config from the Worker before we instantiate
-    // anything that reads DEMO_CONFIGS.  Capped at 3 s so a slow
-    // Worker never blocks the page indefinitely.
-    await Promise.race([
-        applyRemoteConfig(),
-        new Promise(r => setTimeout(r, 3000)),
-    ]);
+    // Remote config is fetched in parallel with the first PLY download.
+    // It used to block the whole viewer for up to 3 s (Promise.race with a
+    // 3 s timeout), which served no one: if the Worker is fast, the race
+    // paid a round-trip for a patch that's almost always empty; if it's
+    // slow, the user stared at "Loading…" for 3 s before any bytes moved.
+    // Now we start the default scene with baked DEMO_CONFIGS instantly,
+    // and re-apply the live config to the current scene when/if it lands.
+    const configPromise = applyRemoteConfig();
 
     const loader = new PntLoader(CACHE_NAME);
     const viewer = new PointCloudViewer(canvas, document.getElementById('demo-message'), loader);
@@ -289,6 +358,24 @@ async function initDemo() {
     const controls = new ViewerControls(viewer);
 
     let currentDemo = null;
+
+    // When the remote config finally arrives, re-bind the currently-viewed
+    // scene if it was patched.  Other scenes pick up the live values on
+    // their next select() — no need to rerun the render pipeline.
+    configPromise.then((patchedKeys) => {
+        if (!patchedKeys || !patchedKeys.length) return;
+        if (currentDemo && patchedKeys.includes(currentDemo)) {
+            const cfg = DEMO_CONFIGS[currentDemo];
+            const resolved = controls.bind(currentDemo, cfg);
+            // Update live viewer state without re-loading the cloud.
+            viewer.setPointSize(resolved.pointSize);
+            if (resolved.samplingRate != null) viewer.setSamplingRate(resolved.samplingRate);
+            if (resolved.brightness   != null) viewer.setBrightness(resolved.brightness);
+            if (resolved.background)           viewer.setBackground(resolved.background);
+            if (resolved.rotation)             viewer.setRotation(resolved.rotation);
+            if (resolved.camera)               viewer.setCameraOffset(resolved.camera);
+        }
+    });
 
     function select(key) {
         const cfg = DEMO_CONFIGS[key];
@@ -359,23 +446,31 @@ async function initDemo() {
         try { v.currentTime = 0; } catch {}
     }
 
-    // Fire parallel prefetches for the non-selected scenes shortly
-    // after the current scene's load resolves.  HTTP/2 handles the
-    // multiplexing; the short delay gives the current load's trailing
-    // blocks the pipe first, then neighbours warm up in the background
-    // so later clicks hit the HTTP cache.
-    function schedulePrefetch(priorityKey) {
+    // After the current scene finishes loading, warm the cache for the
+    // other five scenes so a later thumbnail click hits local storage.
+    // We serialise them (one request in flight at a time) instead of
+    // fanning out all five in parallel — parallel prefetch over a shared
+    // connection produces "interleaved garbage" that finishes everything
+    // later than each file would have alone, and on slow links it keeps
+    // the viewer's own bandwidth from recovering when the user interacts
+    // (pan/zoom triggers no downloads, but a next-click does).  Each
+    // prefetch honours `priority: 'low'` so if the user clicks a
+    // different thumbnail mid-queue, the foreground fetch jumps ahead.
+    async function schedulePrefetch(priorityKey) {
         const conn = navigator.connection;
         if (conn && (conn.saveData || ['slow-2g', '2g'].includes(conn.effectiveType))) {
             return; // respect data-saver mode
         }
-        setTimeout(() => {
+        // Brief delay lets the selected scene's trailing blocks decode
+        // without contention before background fills start.
+        await new Promise(r => setTimeout(r, 600));
+        for (const [k, cfg] of Object.entries(DEMO_CONFIGS)) {
+            if (k === priorityKey) continue;
+            // Bail if the user navigated away from the priority scene;
+            // `select()` is responsible for the new scene's neighbours.
             if (currentDemo !== priorityKey) return;
-            Object.entries(DEMO_CONFIGS).forEach(([k, cfg]) => {
-                if (k === priorityKey) return;
-                loader.prefetch(cfg.cloud).catch(() => {});
-            });
-        }, 600);
+            try { await loader.prefetch(cfg.cloud); } catch {}
+        }
     }
 
     thumbs.forEach(t => {
@@ -423,7 +518,11 @@ class PntLoader {
             const hit = await cache.match(url);
             if (hit) return hit;
         }
-        const resp = await fetch(url, { signal });
+        // `priority: 'high'` marks the foreground load so the browser
+        // services it ahead of any low-priority sibling prefetches
+        // kicked off by schedulePrefetch().  Safe fallback: browsers
+        // that don't support it just ignore the hint.
+        const resp = await fetch(url, { signal, priority: 'high' });
         if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${url}`);
         // Clone BEFORE the body is consumed; the clone goes into the
         // cache, the original is returned for decompression.
@@ -433,6 +532,14 @@ class PntLoader {
 
     // Background prefetch: store the compressed bytes in Cache API, skip
     // decompression.  Subsequent .load() calls hit the cache.
+    //
+    // We stream-drain the response body into a WritableStream sink rather
+    // than calling resp.arrayBuffer().  arrayBuffer() allocates a
+    // contiguous buffer sized for the whole payload (up to 55 MB here),
+    // which sits on the heap until the caller's scope ends.  The sink
+    // version lets each chunk be GC'd as soon as cache.put() has consumed
+    // its clone, so prefetch holds only a few KB of transient memory
+    // regardless of file size.
     async prefetch(url) {
         if (this.inflight.has(url)) return this.inflight.get(url);
         const cache = await this._openCache();
@@ -444,9 +551,10 @@ class PntLoader {
             const resp = await fetch(url, { priority: 'low' });
             if (!resp.ok) return;
             if (cache) await cache.put(url, resp.clone()).catch(() => {});
-            // Consume the body so the connection is released even if we
-            // never `load()` this URL.
-            await resp.arrayBuffer().catch(() => {});
+            // Drain the body without materialising an ArrayBuffer.
+            if (resp.body) {
+                try { await resp.body.pipeTo(new WritableStream()); } catch {}
+            }
         })();
         this.inflight.set(url, p);
         p.finally(() => this.inflight.delete(url));
@@ -827,8 +935,12 @@ class PointCloudViewer {
         if (this.measureBtn) {
             this.measureBtn.classList.toggle('active', this.measureMode);
             this.measureBtn.title = this.measureMode
-                ? 'Click to disable distance measurement'
-                : 'Click two points to measure distance';
+                ? 'Measuring — click two points on the cloud (click here to exit)'
+                : 'Toggle distance measurement — click two points on the cloud to measure';
+            const labelEl = this.measureBtn.querySelector('.measure-label');
+            if (labelEl) {
+                labelEl.textContent = this.measureMode ? 'Measuring…' : 'Measure distance';
+            }
         }
         if (this.measureHintEl) {
             this.measureHintEl.classList.toggle('visible', this.measureMode);
