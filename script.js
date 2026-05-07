@@ -353,6 +353,52 @@ const CONTROLS_STORAGE_KEY = 'unit-demo-controls-v2';
 
 const CACHE_NAME = 'unit-pnt-v10';
 
+const DEMO_DEPENDENCY_SCRIPTS = [
+    'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js',
+    'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js'
+];
+
+let demoDependenciesPromise = null;
+
+function loadScriptOnce(src) {
+    return new Promise((resolve, reject) => {
+        const absoluteSrc = new URL(src, document.baseURI).href;
+        const existing = Array.from(document.scripts).find(s => s.src === absoluteSrc);
+        if (existing) {
+            if (existing.dataset.loaded === 'true') {
+                resolve();
+                return;
+            }
+            existing.addEventListener('load', () => resolve(), { once: true });
+            existing.addEventListener('error', () => reject(new Error(`Failed to load ${src}`)), { once: true });
+            return;
+        }
+        const script = document.createElement('script');
+        script.src = src;
+        script.async = false;
+        script.onload = () => {
+            script.dataset.loaded = 'true';
+            resolve();
+        };
+        script.onerror = () => reject(new Error(`Failed to load ${src}`));
+        document.head.appendChild(script);
+    });
+}
+
+function ensureDemoDependencies() {
+    if (window.THREE && window.THREE.OrbitControls) return Promise.resolve();
+    if (!demoDependenciesPromise) {
+        demoDependenciesPromise = DEMO_DEPENDENCY_SCRIPTS
+            .reduce((p, src) => p.then(() => loadScriptOnce(src)), Promise.resolve())
+            .then(() => {
+                if (!window.THREE || !window.THREE.OrbitControls) {
+                    throw new Error('Three.js demo dependencies did not initialize');
+                }
+            });
+    }
+    return demoDependenciesPromise;
+}
+
 // Small Cloudflare Worker (in webpage/worker/) that stores the current
 // per-scene initial view as a single JSON blob in Workers KV.  Source of
 // truth for the baked defaults once deployed — every page load fetches
@@ -393,6 +439,13 @@ async function applyRemoteConfig() {
 async function initDemo() {
     const canvas = document.getElementById('demo-canvas');
     if (!canvas) return;
+    const messageEl = document.getElementById('demo-message');
+    if (messageEl) {
+        messageEl.textContent = 'Preparing 3D viewer...';
+        messageEl.style.display = 'flex';
+        messageEl.style.opacity = '1';
+    }
+    await ensureDemoDependencies();
 
     // Remote config is fetched in parallel with the first PLY download.
     // It used to block the whole viewer for up to 3 s (Promise.race with a
@@ -404,7 +457,7 @@ async function initDemo() {
     const configPromise = applyRemoteConfig();
 
     const loader = new PntLoader(CACHE_NAME);
-    const viewer = new PointCloudViewer(canvas, document.getElementById('demo-message'), loader);
+    const viewer = new PointCloudViewer(canvas, messageEl, loader);
     const thumbs = document.querySelectorAll('.demo-thumb');
     const controls = new ViewerControls(viewer);
 
