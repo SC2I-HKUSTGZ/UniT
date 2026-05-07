@@ -435,10 +435,12 @@ async function initDemo() {
 
     const loader = new PntLoader(CACHE_NAME);
     const viewer = new PointCloudViewer(canvas, messageEl, loader);
-    const thumbs = document.querySelectorAll('.demo-thumb');
+    const thumbs = Array.from(document.querySelectorAll('.demo-thumb'));
     const controls = new ViewerControls(viewer);
 
     let currentDemo = null;
+    let activeThumbVideo = null;
+    let activeThumbToken = 0;
 
     // When the remote config finally arrives, re-bind the currently-viewed
     // scene if it was patched.  Other scenes pick up the live values on
@@ -460,16 +462,23 @@ async function initDemo() {
 
     function select(key) {
         const cfg = DEMO_CONFIGS[key];
-        if (!cfg || key === currentDemo) return;
+        if (!cfg) return;
+        if (key === currentDemo) {
+            const selectedVideo = document.querySelector(`.demo-thumb[data-demo="${key}"] video`);
+            if (selectedVideo) focusThumbVideo(selectedVideo);
+            return;
+        }
         currentDemo = key;
+        let selectedVideo = null;
         thumbs.forEach(t => {
             const isSelected = t.dataset.demo === key;
             t.classList.toggle('selected', isSelected);
             const v = t.querySelector('video');
             if (!v) return;
-            if (isSelected) focusThumbVideo(v);
-            else            blurThumbVideo(v);
+            if (isSelected) selectedVideo = v;
+            else blurThumbVideo(v);
         });
+        if (selectedVideo) focusThumbVideo(selectedVideo);
         const resolved = controls.bind(key, cfg);
         viewer.show(key, resolved);
     }
@@ -488,10 +497,27 @@ async function initDemo() {
     //   3. Chrome also pauses media when the tab is hidden.  When the
     //      user comes back (visibilitychange → "visible"), re-arm the
     //      currently-selected thumb so it resumes looping.
-    const tryPlay = (v) => {
-        if (!v || !v.paused) return;
+    const isActiveThumbVideo = (v, token = activeThumbToken) =>
+        v && v === activeThumbVideo && token === activeThumbToken;
+
+    const pauseInactiveThumbVideos = () => {
+        thumbs.forEach(t => {
+            const v = t.querySelector('video');
+            if (!v || v === activeThumbVideo) return;
+            if (!v.paused) v.pause();
+        });
+    };
+
+    const tryPlay = (v, token = activeThumbToken) => {
+        if (!isActiveThumbVideo(v, token)) return;
+        pauseInactiveThumbVideos();
+        if (!v.paused) return;
         const p = v.play();
-        if (p && typeof p.catch === 'function') p.catch(() => {});
+        if (p && typeof p.catch === 'function') {
+            p.catch(() => {
+                if (isActiveThumbVideo(v, token)) pauseInactiveThumbVideos();
+            });
+        }
     };
     const getSelectedVideo = () => {
         const sel = document.querySelector('.demo-thumb.selected video');
@@ -510,10 +536,20 @@ async function initDemo() {
     });
 
     function focusThumbVideo(v) {
+        activeThumbVideo = v;
+        activeThumbToken += 1;
+        const token = activeThumbToken;
+        pauseInactiveThumbVideos();
+
+        v.muted = true;
+        v.loop = true;
+        v.playsInline = true;
         if (v.preload !== 'auto') v.preload = 'auto';
+        try { v.currentTime = 0; } catch {}
         const start = () => {
-            try { v.currentTime = 0; } catch {}
-            tryPlay(v);
+            if (!isActiveThumbVideo(v, token)) return;
+            pauseInactiveThumbVideos();
+            tryPlay(v, token);
         };
         start();                                            // kick off loading + play
         v.addEventListener('loadeddata', start, { once: true });
@@ -528,6 +564,19 @@ async function initDemo() {
     }
 
     thumbs.forEach(t => {
+        const v = t.querySelector('video');
+        if (v) {
+            const enforceSingleActivePlayback = () => {
+                if (v === activeThumbVideo) {
+                    pauseInactiveThumbVideos();
+                } else {
+                    v.pause();
+                    try { v.currentTime = 0; } catch {}
+                }
+            };
+            v.addEventListener('play', enforceSingleActivePlayback);
+            v.addEventListener('playing', enforceSingleActivePlayback);
+        }
         t.addEventListener('click', () => select(t.dataset.demo));
     });
 
