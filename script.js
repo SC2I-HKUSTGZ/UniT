@@ -2,7 +2,7 @@
    UniT project page — interactive examples
    Chapter nav + PNT v4 point-cloud viewer + video+cover sync
 
-   Loading strategy (true streaming + parallel + cached)
+   Loading strategy (lazy init + true streaming + cached)
    -----------------------------------------------------
    Each scene is served as a gzipped .pnt.gz v4 file.  The payload is
    split into fixed-size blocks of 16 384 points; the entire cloud was
@@ -35,21 +35,18 @@
        land.
 
    Other wins layered on top:
+     - The whole viewer is lazy-started only when the Examples section
+       is opened or scrolled near the viewport.  This keeps the project
+       page and Results section cheap to open.
      - `Cache API` under the name "unit-pnt-v4": first visit pays the
        network cost, every subsequent visit is an instant memory read.
-     - After the current scene's first block renders, we kick off
-       *parallel* prefetches of the other five scenes so subsequent
-       clicks are usually cache hits.  HTTP/2 multiplexing keeps this
-       cheap.
-     - `<link rel="prefetch">` tags in protected.html warm the HTTP
-       cache before any thumbnail is clicked.
    ======================================== */
 
 document.addEventListener('DOMContentLoaded', () => {
     initNavigation();
     initIntroVideo();   // lazy-loads intro.mp4 only when it scrolls into view
     evictStaleCaches(); // removes unit-pnt-v1..v9, frees up to ~1.5 GB per user
-    initDemo();         // non-blocking: starts loading the default scene immediately
+    initDeferredDemo(); // starts Three.js only when Examples is actually reached
 });
 
 // ========================================
@@ -127,6 +124,60 @@ function initNavigation() {
             if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
         });
     });
+}
+
+// ========================================
+// Deferred Examples bootstrap
+//
+// The point-cloud viewer is the only heavyweight part of the page: it
+// creates a WebGL renderer, downloads/decompresses a 55 MB default scene,
+// allocates large typed arrays, and renders continuously while active.
+// Keep all of that behind user intent so opening the project page or
+// reading Results cannot saturate the GPU.
+// ========================================
+function initDeferredDemo() {
+    const demo = document.getElementById('demo');
+    if (!demo) return;
+
+    let started = false;
+    const start = () => {
+        if (started) return;
+        started = true;
+        initDemo().catch(err => {
+            console.error('Failed to initialize demo:', err);
+            started = false;
+        });
+    };
+
+    const demoButton = document.querySelector('.chapters button[data-section="demo"]');
+    if (demoButton) {
+        demoButton.addEventListener('click', () => requestAnimationFrame(start), { once: true });
+    }
+
+    if ('IntersectionObserver' in window) {
+        const io = new IntersectionObserver((entries, observer) => {
+            for (const entry of entries) {
+                if (!entry.isIntersecting) continue;
+                observer.disconnect();
+                start();
+                break;
+            }
+        }, { rootMargin: '320px 0px', threshold: 0.01 });
+        io.observe(demo);
+        return;
+    }
+
+    const maybeStart = () => {
+        const rect = demo.getBoundingClientRect();
+        if (rect.top <= window.innerHeight + 320 && rect.bottom >= -320) {
+            window.removeEventListener('scroll', maybeStart);
+            window.removeEventListener('resize', maybeStart);
+            start();
+        }
+    };
+    window.addEventListener('scroll', maybeStart, { passive: true });
+    window.addEventListener('resize', maybeStart);
+    maybeStart();
 }
 
 // ========================================
@@ -390,7 +441,7 @@ async function initDemo() {
             else            blurThumbVideo(v);
         });
         const resolved = controls.bind(key, cfg);
-        viewer.show(key, resolved).then(() => schedulePrefetch(key));
+        viewer.show(key, resolved);
     }
 
     // Start (or resume) autoplay on the currently-focused thumbnail.
@@ -446,33 +497,6 @@ async function initDemo() {
         try { v.currentTime = 0; } catch {}
     }
 
-    // After the current scene finishes loading, warm the cache for the
-    // other five scenes so a later thumbnail click hits local storage.
-    // We serialise them (one request in flight at a time) instead of
-    // fanning out all five in parallel — parallel prefetch over a shared
-    // connection produces "interleaved garbage" that finishes everything
-    // later than each file would have alone, and on slow links it keeps
-    // the viewer's own bandwidth from recovering when the user interacts
-    // (pan/zoom triggers no downloads, but a next-click does).  Each
-    // prefetch honours `priority: 'low'` so if the user clicks a
-    // different thumbnail mid-queue, the foreground fetch jumps ahead.
-    async function schedulePrefetch(priorityKey) {
-        const conn = navigator.connection;
-        if (conn && (conn.saveData || ['slow-2g', '2g'].includes(conn.effectiveType))) {
-            return; // respect data-saver mode
-        }
-        // Brief delay lets the selected scene's trailing blocks decode
-        // without contention before background fills start.
-        await new Promise(r => setTimeout(r, 600));
-        for (const [k, cfg] of Object.entries(DEMO_CONFIGS)) {
-            if (k === priorityKey) continue;
-            // Bail if the user navigated away from the priority scene;
-            // `select()` is responsible for the new scene's neighbours.
-            if (currentDemo !== priorityKey) return;
-            try { await loader.prefetch(cfg.cloud); } catch {}
-        }
-    }
-
     thumbs.forEach(t => {
         t.addEventListener('click', () => select(t.dataset.demo));
     });
@@ -506,22 +530,17 @@ class PntLoader {
         catch { return null; }
     }
 
-    // Fetch compressed bytes (cache-then-network).  The `<link rel="prefetch">`
-    // tags in protected.html populate the browser's HTTP disk cache before
-    // we ever reach this function, so first-click fetches land straight from
-    // local disk.  Options are left at defaults — HTTP-cache hits work for
-    // any mode/credentials, unlike the preload cache which is finicky about
-    // matching.
+    // Fetch compressed bytes (cache-then-network). Options are left at
+    // defaults so normal HTTP-cache hits work for any mode/credentials,
+    // unlike the preload cache which is finicky about matching.
     async _fetchCompressed(url, signal) {
         const cache = await this._openCache();
         if (cache) {
             const hit = await cache.match(url);
             if (hit) return hit;
         }
-        // `priority: 'high'` marks the foreground load so the browser
-        // services it ahead of any low-priority sibling prefetches
-        // kicked off by schedulePrefetch().  Safe fallback: browsers
-        // that don't support it just ignore the hint.
+        // `priority: 'high'` marks the foreground load. Safe fallback:
+        // browsers that don't support it just ignore the hint.
         const resp = await fetch(url, { signal, priority: 'high' });
         if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${url}`);
         // Clone BEFORE the body is consumed; the clone goes into the
@@ -780,7 +799,6 @@ class PointCloudViewer {
 
         this.init();
         this.initMeasureUI();
-        this.animate();
         window.addEventListener('resize', () => this.onResize());
     }
 
@@ -797,10 +815,10 @@ class PointCloudViewer {
         this.renderer = new THREE.WebGLRenderer({
             canvas: this.canvas,
             antialias: false,
-            powerPreference: 'high-performance'
+            powerPreference: 'low-power'
         });
         this.renderer.setSize(width, height);
-        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+        this.renderer.setPixelRatio(1);
 
         this.controls = new THREE.OrbitControls(this.camera, this.canvas);
         this.controls.enableDamping = true;
@@ -825,6 +843,7 @@ class PointCloudViewer {
         this._totalPoints = 0;
 
         this._installRotateDrag();
+        this._installRenderVisibilityGate();
     }
 
     // Custom drag-to-rotate: left-button drag over the canvas rotates
@@ -1403,10 +1422,47 @@ class PointCloudViewer {
         this.renderer.setSize(width, height);
     }
 
+    _installRenderVisibilityGate() {
+        this._inViewport = true;
+        this._docVisible = document.visibilityState === 'visible';
+        this._rafId = null;
+
+        const sync = () => this._syncRenderLoop();
+        document.addEventListener('visibilitychange', () => {
+            this._docVisible = document.visibilityState === 'visible';
+            sync();
+        });
+
+        if ('IntersectionObserver' in window) {
+            this._inViewport = false;
+            this._renderObserver = new IntersectionObserver((entries) => {
+                this._inViewport = entries.some(e => e.isIntersecting);
+                sync();
+            }, { threshold: 0.01 });
+            this._renderObserver.observe(this.container);
+        }
+
+        sync();
+    }
+
+    _syncRenderLoop() {
+        const shouldRender = this._inViewport && this._docVisible;
+        if (shouldRender && !this._rafId) {
+            this.animate();
+        } else if (!shouldRender && this._rafId) {
+            cancelAnimationFrame(this._rafId);
+            this._rafId = null;
+        }
+    }
+
     animate() {
-        requestAnimationFrame(() => this.animate());
+        if (!this._inViewport || !this._docVisible) {
+            this._rafId = null;
+            return;
+        }
         this.controls.update();
         this.renderer.render(this.scene, this.camera);
+        this._rafId = requestAnimationFrame(() => this.animate());
     }
 }
 
