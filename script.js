@@ -441,6 +441,7 @@ async function initDemo() {
     let currentDemo = null;
     let activeThumbVideo = null;
     let activeThumbToken = 0;
+    let activeThumbLoopTimer = null;
 
     // When the remote config finally arrives, re-bind the currently-viewed
     // scene if it was patched.  Other scenes pick up the live values on
@@ -508,9 +509,17 @@ async function initDemo() {
         });
     };
 
+    const rewindIfAtEnd = (v, force = false) => {
+        const duration = Number.isFinite(v.duration) ? v.duration : 0;
+        const atEnd = v.ended || (duration > 0 && v.currentTime >= duration - 0.08);
+        if (!force && !atEnd) return;
+        try { v.currentTime = 0; } catch {}
+    };
+
     const tryPlay = (v, token = activeThumbToken) => {
         if (!isActiveThumbVideo(v, token)) return;
         pauseInactiveThumbVideos();
+        rewindIfAtEnd(v);
         if (!v.paused) return;
         const p = v.play();
         if (p && typeof p.catch === 'function') {
@@ -519,6 +528,31 @@ async function initDemo() {
             });
         }
     };
+
+    const maintainActiveThumbLoop = (v, token = activeThumbToken) => {
+        if (!isActiveThumbVideo(v, token)) return;
+        const thumb = v.closest('.demo-thumb');
+        if (!thumb || !thumb.classList.contains('selected')) return;
+
+        v.muted = true;
+        v.loop = true;
+        v.playsInline = true;
+        if (v.playbackRate === 0) v.playbackRate = 1;
+
+        const duration = Number.isFinite(v.duration) ? v.duration : 0;
+        if (v.ended || (duration > 0 && v.currentTime >= duration - 0.08)) {
+            rewindIfAtEnd(v, true);
+        }
+        tryPlay(v, token);
+    };
+
+    const armActiveThumbLoop = (v, token) => {
+        if (activeThumbLoopTimer) clearInterval(activeThumbLoopTimer);
+        activeThumbLoopTimer = setInterval(() => {
+            maintainActiveThumbLoop(v, token);
+        }, 250);
+    };
+
     const getSelectedVideo = () => {
         const sel = document.querySelector('.demo-thumb.selected video');
         return sel || null;
@@ -532,7 +566,7 @@ async function initDemo() {
         }
     }, { threshold: 0.1 });
     document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') tryPlay(getSelectedVideo());
+        if (document.visibilityState === 'visible') maintainActiveThumbLoop(getSelectedVideo());
     });
 
     function focusThumbVideo(v) {
@@ -545,11 +579,12 @@ async function initDemo() {
         v.loop = true;
         v.playsInline = true;
         if (v.preload !== 'auto') v.preload = 'auto';
-        try { v.currentTime = 0; } catch {}
+        rewindIfAtEnd(v, true);
+        armActiveThumbLoop(v, token);
         const start = () => {
             if (!isActiveThumbVideo(v, token)) return;
             pauseInactiveThumbVideos();
-            tryPlay(v, token);
+            maintainActiveThumbLoop(v, token);
         };
         start();                                            // kick off loading + play
         v.addEventListener('loadeddata', start, { once: true });
@@ -576,6 +611,17 @@ async function initDemo() {
             };
             v.addEventListener('play', enforceSingleActivePlayback);
             v.addEventListener('playing', enforceSingleActivePlayback);
+            v.addEventListener('ended', () => maintainActiveThumbLoop(v));
+            v.addEventListener('pause', () => {
+                if (v === activeThumbVideo) {
+                    setTimeout(() => maintainActiveThumbLoop(v), 0);
+                }
+            });
+            v.addEventListener('stalled', () => maintainActiveThumbLoop(v));
+            v.addEventListener('suspend', () => maintainActiveThumbLoop(v));
+            v.addEventListener('timeupdate', () => {
+                if (v === activeThumbVideo) rewindIfAtEnd(v);
+            });
         }
         t.addEventListener('click', () => select(t.dataset.demo));
     });
