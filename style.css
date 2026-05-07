@@ -269,6 +269,12 @@ sup {
     gap: 22px;
 }
 
+.result-table-list .result-figure {
+    width: 80%;
+    margin-left: auto;
+    margin-right: auto;
+}
+
 .result-figure {
     margin: 0;
     overflow: hidden;
@@ -1148,6 +1154,10 @@ footer {
 
     .result-table-list {
         gap: 16px;
+    }
+
+    .result-table-list .result-figure {
+        width: 100%;
     }
 
     .result-figure {
