@@ -35,9 +35,9 @@
        land.
 
    Other wins layered on top:
-     - The whole viewer is lazy-started only when the Examples section
-       is opened or scrolled near the viewport.  This keeps the project
-       page and Results section cheap to open.
+     - The whole viewer is lazy-started only when the user explicitly
+       opens or interacts with the Examples section.  This keeps the
+       project page and Results section cheap to open.
      - `Cache API` under the name "unit-pnt-v4": first visit pays the
        network cost, every subsequent visit is an instant memory read.
    ======================================== */
@@ -46,7 +46,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initNavigation();
     initIntroVideo();   // lazy-loads intro.mp4 only when it scrolls into view
     evictStaleCaches(); // removes unit-pnt-v1..v9, frees up to ~1.5 GB per user
-    initDeferredDemo(); // starts Three.js only when Examples is actually reached
+    initDeferredDemo(); // starts Three.js only after explicit Examples intent
 });
 
 // ========================================
@@ -131,9 +131,9 @@ function initNavigation() {
 //
 // The point-cloud viewer is the only heavyweight part of the page: it
 // creates a WebGL renderer, downloads/decompresses a 55 MB default scene,
-// allocates large typed arrays, and renders continuously while active.
-// Keep all of that behind user intent so opening the project page or
-// reading Results cannot saturate the GPU.
+// allocates large typed arrays, and renders while active. Keep all of that
+// behind explicit user intent so opening the project page or jumping past
+// Examples to Results cannot saturate the GPU.
 // ========================================
 function initDeferredDemo() {
     const demo = document.getElementById('demo');
@@ -154,30 +154,7 @@ function initDeferredDemo() {
         demoButton.addEventListener('click', () => requestAnimationFrame(start), { once: true });
     }
 
-    if ('IntersectionObserver' in window) {
-        const io = new IntersectionObserver((entries, observer) => {
-            for (const entry of entries) {
-                if (!entry.isIntersecting) continue;
-                observer.disconnect();
-                start();
-                break;
-            }
-        }, { rootMargin: '320px 0px', threshold: 0.01 });
-        io.observe(demo);
-        return;
-    }
-
-    const maybeStart = () => {
-        const rect = demo.getBoundingClientRect();
-        if (rect.top <= window.innerHeight + 320 && rect.bottom >= -320) {
-            window.removeEventListener('scroll', maybeStart);
-            window.removeEventListener('resize', maybeStart);
-            start();
-        }
-    };
-    window.addEventListener('scroll', maybeStart, { passive: true });
-    window.addEventListener('resize', maybeStart);
-    maybeStart();
+    demo.addEventListener('click', start, { once: true });
 }
 
 // ========================================
