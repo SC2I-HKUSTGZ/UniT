@@ -275,6 +275,18 @@ sup {
     margin-right: auto;
 }
 
+.result-table-list .result-figure-pair {
+    width: 80%;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 16px;
+}
+
+.result-table-list .result-figure-pair .result-figure {
+    width: 100%;
+}
+
 .result-task-title {
     width: 80%;
     margin: 8px auto -8px;
@@ -1173,6 +1185,12 @@ footer {
 
     .result-table-list .result-figure {
         width: 100%;
+    }
+
+    .result-table-list .result-figure-pair {
+        width: 100%;
+        grid-template-columns: 1fr;
+        gap: 12px;
     }
 
     .result-task-title {
