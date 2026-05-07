@@ -192,7 +192,7 @@ sup {
 }
 
 /* Content Cards - Borderless style like TTT3R */
-.abstract, .citation, .visualization-container, .method, .capabilities, .acknowledgements {
+.abstract, .citation, .visualization-container, .method, .results, .capabilities, .acknowledgements {
     background-color: transparent;
     padding: 20px 0;
     border-radius: 0;
@@ -201,13 +201,13 @@ sup {
     transition: padding-bottom 0.1s ease-in-out;
 }
 
-.abstract h2, .citation h2, .visualization-container h2, .method h2, .capabilities h2, .acknowledgements h2 {
+.abstract h2, .citation h2, .visualization-container h2, .method h2, .results h2, .capabilities h2, .acknowledgements h2 {
     margin-top: 0;
     text-align: left;
     font-size: 1.5em;
 }
 
-.abstract p, .method p, .capabilities p, .acknowledgements p {
+.abstract p, .method p, .results p, .capabilities p, .acknowledgements p {
     text-align: justify;
     font-size: 1.05em;
 }
@@ -255,6 +255,45 @@ sup {
     font-size: 0.8em;
     opacity: 0.7;
     margin-top: 4px;
+}
+
+/* Results */
+.results-intro {
+    max-width: 920px;
+    margin: 0 0 22px;
+    color: #3c4043;
+}
+
+.result-table-list {
+    display: grid;
+    gap: 22px;
+}
+
+.result-figure {
+    margin: 0;
+    overflow: hidden;
+    border: 1px solid #e8eaed;
+    border-radius: 8px;
+    background: #fff;
+}
+
+.result-figure img {
+    display: block;
+    width: 100%;
+    height: auto;
+    background: #fff;
+}
+
+.result-figure-wide {
+    margin-bottom: 22px;
+}
+
+.result-figure figcaption {
+    padding: 10px 14px 12px;
+    border-top: 1px solid #edf0f2;
+    color: #5f6368;
+    font-size: 0.9em;
+    line-height: 1.45;
 }
 
 /* Visualization */
@@ -1073,7 +1112,7 @@ footer {
     .affiliations { font-size: 0.7em; }
     .links a { padding: 8px 15px; margin: 5px; }
     
-    .abstract, .citation, .visualization-container, .method, .capabilities, .acknowledgements {
+    .abstract, .citation, .visualization-container, .method, .results, .capabilities, .acknowledgements {
         padding: 15px 0;
         border-radius: 0;
     }
@@ -1082,7 +1121,7 @@ footer {
     .video-container video { border-radius: 12px; }
     .video-placeholder { border-radius: 12px; }
     
-    .abstract h2, .citation h2, .visualization-container h2, .method h2, .capabilities h2, .acknowledgements h2 {
+    .abstract h2, .citation h2, .visualization-container h2, .method h2, .results h2, .capabilities h2, .acknowledgements h2 {
         font-size: 1.3em;
     }
     
@@ -1099,8 +1138,24 @@ footer {
     
     #canvas { border-radius: 12px; }
     
-    .abstract p, .method p, .capabilities p, .acknowledgements p {
+    .abstract p, .method p, .results p, .capabilities p, .acknowledgements p {
         font-size: 0.95em;
+    }
+
+    .result-table-list {
+        gap: 16px;
+    }
+
+    .result-figure {
+        overflow-x: auto;
+    }
+
+    .result-figure img {
+        min-width: 760px;
+    }
+
+    .result-figure-wide img {
+        min-width: 680px;
     }
     
     .citation pre {
