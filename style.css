@@ -275,6 +275,21 @@ sup {
     margin-right: auto;
 }
 
+.result-task-title {
+    width: 80%;
+    margin: 8px auto -8px;
+    padding-top: 12px;
+    border-top: 1px solid #e8eaed;
+    color: #202124;
+    font-size: 1.15em;
+    font-weight: 500;
+}
+
+.result-task-title-wide {
+    width: 100%;
+    margin-top: 24px;
+}
+
 .result-figure {
     margin: 0;
     overflow: hidden;
@@ -1158,6 +1173,12 @@ footer {
 
     .result-table-list .result-figure {
         width: 100%;
+    }
+
+    .result-task-title {
+        width: 100%;
+        margin-bottom: -6px;
+        font-size: 1.05em;
     }
 
     .result-figure {
