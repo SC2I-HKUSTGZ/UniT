@@ -2,12 +2,12 @@
    UniT project page — interactive examples
    Chapter nav + PNT v4 point-cloud viewer + video+cover sync
 
-   Loading strategy (lazy init + true streaming + bounded memory)
+   Loading strategy (lazy init + resumable chunk streaming)
    -----------------------------------------------------
-   Each scene is served as a gzipped .pnt.gz v4 file.  The payload is
-   split into fixed-size blocks of 16 384 points; the entire cloud was
-   randomly shuffled before being blocked, so **any file prefix is a
-   uniform random subsample of the whole scene**.  That means:
+   Each scene is served as one chunk-indexed .pnts file.  The payload is
+   split into independently-compressed chunks of 65 536 points; the point
+   order is inherited from the final shuffled .pnt stream, so **any chunk
+   prefix is a uniform random subsample of the whole scene**.  That means:
 
      - The first block rendered already spans the full bounding box —
        the cloud looks like a sparse sketch of the real scene, not a
@@ -20,9 +20,11 @@
        arrived so far is still a usable visualisation.
 
    Implementation:
-     - `DecompressionStream('gzip')` feeds a rolling scratch buffer.  A
-       parser walks it block-by-block, emitting `onBlock` callbacks the
-       instant each block has fully arrived, then drops consumed bytes.
+     - The viewer fetches the .pnts header/index first, then uses HTTP
+       Range requests for independently-compressed chunks. Completed
+       chunks are stored in IndexedDB, and partial in-flight chunks are
+       kept in memory so switch-away/switch-back resumes instead of
+       restarting.
      - The viewer preallocates the final-size position / colour arrays
        on header, installs an empty geometry (drawRange=0), then
        appends each block in place.  `BufferAttribute.updateRange`
@@ -35,9 +37,9 @@
        land.
 
    Other wins layered on top:
-     - The whole viewer is lazy-started only when the user explicitly
-       opens or interacts with the Examples section.  This keeps the
-       project page and Results section cheap to open.
+     - The whole viewer is lazy-started only when the Examples section
+       enters view. This keeps the project page and Results section cheap
+       to open.
      - Scene switches abort the active fetch/decompress/read loop and
        stale GPU flushes so old loads cannot build up behind the current
        thumbnail.
@@ -95,7 +97,7 @@ function initIntroVideo() {
 // Cache eviction
 //
 // The Cache API name embeds a version number (unit-pnt-vN) that we bump
-// whenever .pnt.gz on disk changes format or geometry.  Without explicit
+// whenever point-cloud bytes change format or geometry. Without explicit
 // cleanup, every bump leaks up to ~175 MB of stale cache per user (the
 // old entries still live under the old cache name forever).  On startup,
 // delete every unit-pnt-* cache that isn't the current one.
@@ -109,6 +111,15 @@ function evictStaleCaches() {
             }
         }
     }).catch(() => {});
+    if ('indexedDB' in window && indexedDB.databases) {
+        indexedDB.databases().then(dbs => {
+            for (const db of dbs) {
+                if (db.name?.startsWith('unit-pnts-') && db.name !== PNTS_DB_NAME) {
+                    indexedDB.deleteDatabase(db.name);
+                }
+            }
+        }).catch(() => {});
+    }
 }
 
 // ========================================
@@ -130,10 +141,9 @@ function initNavigation() {
 // ========================================
 // Deferred Examples bootstrap
 //
-// The point-cloud viewer is the only heavyweight part of the page.  It
-// now has two entry points: viewport exposure may load only the tiny root
-// preview, while direct interaction with the canvas or thumbnails starts
-// the full progressive refinement path.
+// The point-cloud viewer is the only heavyweight part of the page. It starts
+// the active scene's single resumable stream when Examples enters view; clicks
+// and thumbnails only ensure the same stream is active.
 // ========================================
 function initDeferredDemo() {
     const demo = document.getElementById('demo');
@@ -151,22 +161,18 @@ function initDeferredDemo() {
         return demoPromise;
     };
 
-    const startPreview = () => {
-        getDemo().then(controller => controller.showPreview()).catch(() => {});
-    };
-
     const startFull = (key) => {
         getDemo().then(controller => controller.showFull(key)).catch(() => {});
     };
 
     const demoButton = document.querySelector('.chapters button[data-section="demo"]');
     if (demoButton) {
-        demoButton.addEventListener('click', () => requestAnimationFrame(startPreview), { once: true });
+        demoButton.addEventListener('click', () => requestAnimationFrame(() => startFull()), { once: true });
     }
 
     if ('IntersectionObserver' in window) {
         const io = new IntersectionObserver((entries) => {
-            if (entries.some(e => e.isIntersecting)) startPreview();
+            if (entries.some(e => e.isIntersecting)) startFull();
         }, { rootMargin: '160px 0px', threshold: 0.01 });
         io.observe(demo);
     }
@@ -181,7 +187,7 @@ function initDeferredDemo() {
 // Per-demo configuration
 //
 // Fields baked at build time (drive the initial look of each scene):
-//   cloud         — .pnt.gz path
+//   cloud         — chunk-indexed .pnts path
 //   pointSize     — splat size in world units, tuned so different
 //                   scene extents read consistently
 //   flipY         — negate Y after centring (handy when the source
@@ -189,7 +195,7 @@ function initDeferredDemo() {
 //   camera        — unit offset from the bounding-sphere centre,
 //                   scaled by the sphere radius on load
 //   samplingRate  — fraction of points drawn [0..1].  Because the
-//                   .pnt.gz stream is randomly shuffled, any prefix
+//                   .pnts stream is randomly shuffled, any chunk prefix
 //                   is a uniform spatial sample — so this is just a
 //                   drawRange cutoff, no re-sampling cost.
 //   brightness    — scalar multiplier applied to vertex colours in
@@ -208,7 +214,7 @@ function initDeferredDemo() {
 // const DEMO_CONFIGS = {
 //     hkust_intr: {
 //         title: 'HKUST (GZ) INTR',
-//         cloud: 'assets/demos/hkust_intr/scene.pnt.gz',
+//         cloud: 'assets/demos/hkust_intr/scene.pnts',
 //         pointSize: 0.011,
 //         flipY: true,
 //         camera: { x: -0.6, y: 0.3, z: -1.4 },
@@ -219,7 +225,7 @@ function initDeferredDemo() {
 //     },
 //     hkust_toy: {
 //         title: 'HKUST (GZ) Toy',
-//         cloud: 'assets/demos/hkust_toy/scene.pnt.gz',
+//         cloud: 'assets/demos/hkust_toy/scene.pnts',
 //         pointSize: 0.0042,
 //         flipY: true,
 //         camera: { x: -0.4, y: 0.2, z: -1.5 },
@@ -230,7 +236,7 @@ function initDeferredDemo() {
 //     },
 //     hkust_redbird: {
 //         title: 'HKUST (GZ) Red Bird',
-//         cloud: 'assets/demos/hkust_redbird/scene.pnt.gz',
+//         cloud: 'assets/demos/hkust_redbird/scene.pnts',
 //         pointSize: 0.044,
 //         flipY: true,
 //         camera: { x: -0.5, y: 0.35, z: -1.6 },
@@ -241,7 +247,7 @@ function initDeferredDemo() {
 //     },
 //     drift: {
 //         title: 'Drift',
-//         cloud: 'assets/demos/drift/scene.pnt.gz',
+//         cloud: 'assets/demos/drift/scene.pnts',
 //         pointSize: 0.145,
 //         flipY: true,
 //         camera: { x: -0.25, y: 0.25, z: -0.75 },
@@ -252,7 +258,7 @@ function initDeferredDemo() {
 //     },
 //     gta_sfm: {
 //         title: 'GTA SfM',
-//         cloud: 'assets/demos/gta_sfm/scene.pnt.gz',
+//         cloud: 'assets/demos/gta_sfm/scene.pnts',
 //         pointSize: 0.082,
 //         flipY: true,
 //         camera: { x: -0.4, y: 0.2, z: -1.4 },
@@ -263,7 +269,7 @@ function initDeferredDemo() {
 //     },
 //     kitti: {
 //         title: 'KITTI',
-//         cloud: 'assets/demos/kitti/scene.pnt.gz',
+//         cloud: 'assets/demos/kitti/scene.pnts',
 //         pointSize: 0.30,
 //         flipY: true,
 //         camera: { x: -0.15, y: 0.22, z: -0.5 },
@@ -278,9 +284,7 @@ function initDeferredDemo() {
 const DEMO_CONFIGS = {
     hkust_intr: {
         title: 'HKUST (GZ) INTR',
-        cloud: 'assets/demos/hkust_intr/scene.pnt.gz',
-        preview: 'assets/demos/hkust_intr/preview.pnt.gz',
-        lods: ['assets/demos/hkust_intr/preview.pnt.gz', 'assets/demos/hkust_intr/lod-1.pnt.gz'],
+        cloud: 'assets/demos/hkust_intr/scene.pnts',
         pointSize: 0.012007,
         flipY: true,
         camera: { x: -0.489, y: 0.244, z: -1.140 },
@@ -291,9 +295,7 @@ const DEMO_CONFIGS = {
     },
     hkust_toy: {
         title: 'HKUST (GZ) Toy',
-        cloud: 'assets/demos/hkust_toy/scene.pnt.gz',
-        preview: 'assets/demos/hkust_toy/preview.pnt.gz',
-        lods: ['assets/demos/hkust_toy/preview.pnt.gz', 'assets/demos/hkust_toy/lod-1.pnt.gz'],
+        cloud: 'assets/demos/hkust_toy/scene.pnts',
         pointSize: 0.000001,
         flipY: true,
         camera: { x: -0.400, y: 0.200, z: -1.500 },
@@ -304,9 +306,7 @@ const DEMO_CONFIGS = {
     },
     hkust_redbird: {
         title: 'HKUST (GZ) Red Bird',
-        cloud: 'assets/demos/hkust_redbird/scene.pnt.gz',
-        preview: 'assets/demos/hkust_redbird/preview.pnt.gz',
-        lods: ['assets/demos/hkust_redbird/preview.pnt.gz', 'assets/demos/hkust_redbird/lod-1.pnt.gz'],
+        cloud: 'assets/demos/hkust_redbird/scene.pnts',
         pointSize: 0.0000,
         flipY: true,
         camera: { x: -0.349, y: 0.244, z: -1.117 },
@@ -317,9 +317,7 @@ const DEMO_CONFIGS = {
     },
     drift: {
         title: 'Drift',
-        cloud: 'assets/demos/drift/scene.pnt.gz',
-        preview: 'assets/demos/drift/preview.pnt.gz',
-        lods: ['assets/demos/drift/preview.pnt.gz'],
+        cloud: 'assets/demos/drift/scene.pnts',
         pointSize: 0.000001,
         flipY: true,
         camera: { x: -0.250, y: 0.250, z: -0.750 },
@@ -330,9 +328,7 @@ const DEMO_CONFIGS = {
     },
     gta_sfm: {
         title: 'GTA SfM',
-        cloud: 'assets/demos/gta_sfm/scene.pnt.gz',
-        preview: 'assets/demos/gta_sfm/preview.pnt.gz',
-        lods: ['assets/demos/gta_sfm/preview.pnt.gz', 'assets/demos/gta_sfm/lod-1.pnt.gz'],
+        cloud: 'assets/demos/gta_sfm/scene.pnts',
         pointSize: 0.000001,
         flipY: true,
         camera: { x: -0.361, y: 0.180, z: -1.263 },
@@ -343,9 +339,7 @@ const DEMO_CONFIGS = {
     },
     kitti: {
         title: 'KITTI',
-        cloud: 'assets/demos/kitti/scene.pnt.gz',
-        preview: 'assets/demos/kitti/preview.pnt.gz',
-        lods: ['assets/demos/kitti/preview.pnt.gz', 'assets/demos/kitti/lod-1.pnt.gz'],
+        cloud: 'assets/demos/kitti/scene.pnts',
         pointSize: 0.103814,
         flipY: true,
         camera: { x: -0.308, y: 0.451, z: -1.025 },
@@ -360,12 +354,14 @@ const DEMO_CONFIGS = {
 // defaults are discarded in favour of the new DEMO_CONFIGS values.
 const CONTROLS_STORAGE_KEY = 'unit-demo-controls-v2';
 
-const CACHE_NAME = 'unit-pnt-v11';
+const CACHE_NAME = 'unit-pnt-v12';
+const PNTS_DB_NAME = 'unit-pnts-v12';
 
-const LOAD_POINT_BUDGET_FACTOR = 0.65;
+const FIRST_PAINT_VISIBLE_POINTS = 786_432;
+const CHUNK_FETCH_WINDOW = 2;
 const INTERACTION_POINT_BUDGET_FACTOR = 1.0;
 const INTERACTION_BUDGET_SETTLE_MS = 450;
-const PNT_COMPACT_THRESHOLD = 1 << 20;
+const PNTS_HEADER_PROBE_BYTES = 8192;
 
 window.__UNIT_DEMO_PERF = window.__UNIT_DEMO_PERF || {
     activeScene: null,
@@ -379,6 +375,12 @@ window.__UNIT_DEMO_PERF = window.__UNIT_DEMO_PERF || {
     visiblePoints: 0,
     loadedPoints: 0,
     totalPoints: 0,
+    loadedChunkCount: 0,
+    totalChunkCount: 0,
+    networkBytes: 0,
+    cachedBytes: 0,
+    partialResumeBytes: 0,
+    redownloadedChunks: 0,
     status: 'idle'
 };
 
@@ -485,7 +487,7 @@ async function initDemo() {
     // and re-apply the live config to the current scene when/if it lands.
     const configPromise = applyRemoteConfig();
 
-    const loader = new PntLoader(CACHE_NAME);
+    const loader = new PntsLoader(PNTS_DB_NAME);
     const viewer = new PointCloudViewer(canvas, messageEl, loader);
     const thumbs = Array.from(document.querySelectorAll('.demo-thumb'));
     const controls = new ViewerControls(viewer);
@@ -501,8 +503,10 @@ async function initDemo() {
     configPromise.then((patchedKeys) => {
         if (!patchedKeys || !patchedKeys.length) return;
         if (currentDemo && patchedKeys.includes(currentDemo)) {
+            if ((viewer.currentState?.visiblePoints || 0) > 0) return;
             const cfg = DEMO_CONFIGS[currentDemo];
             const resolved = controls.bind(currentDemo, cfg);
+            if (viewer.currentState) viewer.currentState.cfg = resolved;
             // Update live viewer state without re-loading the cloud.
             viewer.setPointSize(resolved.pointSize);
             if (resolved.samplingRate != null) viewer.setSamplingRate(resolved.samplingRate);
@@ -710,183 +714,256 @@ async function initDemo() {
 
 
 // ========================================
-// PntLoader
+// PntsLoader
 //
-// Responsibilities:
-//   1. Fetch  .pnt.gz  (Cache API first, network fallback).
-//   2. Pipe the response body through DecompressionStream('gzip').
-//   3. Walk the decompressed byte stream block-by-block, firing:
-//        - onHeader(header)                                    (44 bytes in)
-//        - onBlock(header, bytes, byteOffset, blockCount, blockIdx)
-//                                                              (every 9*bc bytes)
-//      Each callback receives a typed-array view into a rolling buffer;
-//      consumed bytes are compacted away so the full decompressed file is
-//      never retained alongside the final GPU buffers.
+// `scene.pnts` is a single logical point-cloud asset:
+//   - 64-byte PNTS header
+//   - fixed-size index entries
+//   - independently gzip-compressed payload chunks
+//
+// The header/index is fetched once, then chunk payloads are fetched through
+// byte ranges. Completed chunks are persisted in IndexedDB; partial chunks
+// are retained in memory during scene switches so the next activation resumes
+// from the missing byte instead of restarting the chunk.
 // ========================================
-class PntLoader {
-    constructor(cacheName) {
-        this.cacheName = cacheName;
-        this.inflight = new Map();  // url -> Promise<Uint8Array>
+function concatUint8(parts, totalLength) {
+    if (parts.length === 1 && parts[0].byteLength === totalLength) return parts[0];
+    const out = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const part of parts) {
+        out.set(part, offset);
+        offset += part.byteLength;
+    }
+    return out;
+}
+
+class PntsChunkStore {
+    constructor(dbName) {
+        this.dbName = dbName;
+        this.dbPromise = null;
+        this.disabled = !('indexedDB' in window);
     }
 
-    async _openCache() {
-        if (!('caches' in self)) return null;
-        try { return await caches.open(this.cacheName); }
-        catch { return null; }
+    _key(url, index) {
+        return `${url}#${index}`;
     }
 
-    // Fetch compressed bytes (cache-then-network). Foreground loads do
-    // not clone responses into Cache API: a clone keeps downloading even
-    // after the visible load is aborted, which is exactly the hidden work
-    // that makes rapid scene switching accumulate resources. Browser HTTP
-    // cache still handles repeat visits; explicit prefetch() remains
-    // available for future non-interactive warming.
-    async _fetchCompressed(url, signal) {
-        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-        const cache = await this._openCache();
-        if (cache) {
-            const hit = await cache.match(url);
-            if (hit) return hit;
-        }
-        // `priority: 'high'` marks the foreground load. Safe fallback:
-        // browsers that don't support it just ignore the hint.
-        const resp = await fetch(url, { signal, priority: 'high' });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${url}`);
-        return resp;
-    }
-
-    // Background prefetch: store the compressed bytes in Cache API, skip
-    // decompression.  Subsequent .load() calls hit the cache.
-    //
-    // We stream-drain the response body into a WritableStream sink rather
-    // than calling resp.arrayBuffer().  arrayBuffer() allocates a
-    // contiguous buffer sized for the whole payload (up to 55 MB here),
-    // which sits on the heap until the caller's scope ends.  The sink
-    // version lets each chunk be GC'd as soon as cache.put() has consumed
-    // its clone, so prefetch holds only a few KB of transient memory
-    // regardless of file size.
-    async prefetch(url) {
-        if (this.inflight.has(url)) return this.inflight.get(url);
-        const cache = await this._openCache();
-        if (cache) {
-            const hit = await cache.match(url);
-            if (hit) return;
-        }
-        const p = (async () => {
-            const resp = await fetch(url, { priority: 'low' });
-            if (!resp.ok) return;
-            if (cache) await cache.put(url, resp.clone()).catch(() => {});
-            // Drain the body without materialising an ArrayBuffer.
-            if (resp.body) {
-                try { await resp.body.pipeTo(new WritableStream()); } catch {}
-            }
-        })();
-        this.inflight.set(url, p);
-        p.finally(() => this.inflight.delete(url));
-        return p;
-    }
-
-    // Streaming load with per-block callbacks.
-    async load(url, { signal, onHeader, onBlock, onProgress } = {}) {
-        const resp = await this._fetchCompressed(url, signal);
-        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-
-        // Progress bar uses compressed-byte count when we can see it;
-        // otherwise (Cache API responses don't always expose content-
-        // length after decompression) we fall back to a spinner-ish
-        // message upstream.
-        const totalCompressed = parseInt(resp.headers.get('content-length') || '0', 10);
-
-        // DecompressionStream yields the *uncompressed* bytes.  Chain
-        // a passthrough TransformStream on the compressed side so we
-        // can count bytes for progress without double-reading.
-        let compressedReceived = 0;
-        const progressStream = new TransformStream({
-            transform(chunk, controller) {
-                compressedReceived += chunk.byteLength;
-                if (onProgress && totalCompressed > 0) {
-                    onProgress(Math.min(99, Math.round(compressedReceived / totalCompressed * 100)));
+    _db() {
+        if (this.disabled) return Promise.resolve(null);
+        if (this.dbPromise) return this.dbPromise;
+        this.dbPromise = new Promise((resolve) => {
+            const req = indexedDB.open(this.dbName, 1);
+            req.onupgradeneeded = () => {
+                const db = req.result;
+                if (!db.objectStoreNames.contains('chunks')) {
+                    db.createObjectStore('chunks', { keyPath: 'key' });
                 }
-                controller.enqueue(chunk);
-            }
+            };
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => {
+                this.disabled = true;
+                resolve(null);
+            };
         });
+        return this.dbPromise;
+    }
 
-        const stream = resp.body
-            .pipeThrough(progressStream)
-            .pipeThrough(new DecompressionStream('gzip'));
-        const reader = stream.getReader();
-        const abortReader = () => reader.cancel().catch(() => {});
-        if (signal) {
-            if (signal.aborted) {
-                abortReader();
-                throw new DOMException('Aborted', 'AbortError');
-            }
-            signal.addEventListener('abort', abortReader, { once: true });
+    async get(url, index, expectedSize) {
+        const db = await this._db();
+        if (!db) return null;
+        return new Promise(resolve => {
+            const tx = db.transaction('chunks', 'readonly');
+            const req = tx.objectStore('chunks').get(this._key(url, index));
+            req.onsuccess = () => {
+                const row = req.result;
+                const bytes = row?.bytes;
+                if (bytes && bytes.byteLength === expectedSize) resolve(bytes);
+                else resolve(null);
+            };
+            req.onerror = () => resolve(null);
+        });
+    }
+
+    async put(url, index, bytes) {
+        const db = await this._db();
+        if (!db) return false;
+        return new Promise(resolve => {
+            const tx = db.transaction('chunks', 'readwrite');
+            tx.objectStore('chunks').put({
+                key: this._key(url, index),
+                url,
+                index,
+                size: bytes.byteLength,
+                bytes,
+                updatedAt: Date.now(),
+            });
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => resolve(false);
+            tx.onabort = () => resolve(false);
+        });
+    }
+}
+
+class PntsLoader {
+    constructor(dbName) {
+        this.store = new PntsChunkStore(dbName);
+    }
+
+    async _fetchRange(url, start, end, signal, onBytes) {
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+        const resp = await fetch(url, {
+            signal,
+            priority: 'high',
+            headers: { Range: `bytes=${start}-${end}` },
+        });
+        if (resp.status !== 206) {
+            throw new Error(`Range request failed (${resp.status}) for ${url}`);
         }
-
-        let buf = new Uint8Array(1 << 16);   // grow-doubling scratch
-        let len = 0;
-        let header = null;
-        // Byte cursor: where the next unparsed block starts.  Starts
-        // after the 44-byte header once `header` has been parsed.
-        let cursor = 0;
-        let blocksDecoded = 0;
-
-        const ensureCap = (needed) => {
-            if (buf.length >= needed) return;
-            let cap = buf.length;
-            while (cap < needed) cap *= 2;
-            const next = new Uint8Array(cap);
-            next.set(buf.subarray(0, len));
-            buf = next;
-        };
-
+        if (!resp.body) {
+            const arr = new Uint8Array(await resp.arrayBuffer());
+            if (onBytes) onBytes(arr.byteLength);
+            return arr;
+        }
+        const reader = resp.body.getReader();
+        const abortReader = () => reader.cancel().catch(() => {});
+        if (signal) signal.addEventListener('abort', abortReader, { once: true });
+        const parts = [];
+        let total = 0;
         try {
             while (true) {
                 if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
                 const { done, value } = await reader.read();
                 if (done) break;
+                parts.push(value);
+                total += value.byteLength;
+                if (onBytes) onBytes(value.byteLength);
+            }
+        } finally {
+            if (signal) signal.removeEventListener('abort', abortReader);
+        }
+        return concatUint8(parts, total);
+    }
+
+    parseManifest(bytes, url) {
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const magic = String.fromCharCode(
+            view.getUint8(0), view.getUint8(1), view.getUint8(2), view.getUint8(3)
+        );
+        if (magic !== 'PNTS') throw new Error(`Not a PNTS stream: ${url}`);
+        const version = view.getUint32(4, true);
+        if (version !== 1) throw new Error(`Unsupported PNTS version ${version}: ${url}`);
+        const count = view.getUint32(8, true);
+        const blockSize = view.getUint32(12, true);
+        const pointsPerChunk = view.getUint32(16, true);
+        const chunkCount = view.getUint32(20, true);
+        const entrySize = view.getUint32(24, true);
+        const headerSize = view.getUint32(28, true);
+        const indexBytes = headerSize + chunkCount * entrySize;
+        if (entrySize !== 24) throw new Error(`Unsupported PNTS index entry size ${entrySize}: ${url}`);
+        if (bytes.byteLength < indexBytes) return { needBytes: indexBytes };
+
+        const chunks = [];
+        for (let i = 0; i < chunkCount; i += 1) {
+            const base = headerSize + i * entrySize;
+            chunks.push({
+                firstPoint: view.getUint32(base, true),
+                pointCount: view.getUint32(base + 4, true),
+                blockCount: view.getUint32(base + 8, true),
+                compressedSize: view.getUint32(base + 12, true),
+                rawSize: view.getUint32(base + 16, true),
+                offset: view.getUint32(base + 20, true),
+            });
+        }
+
+        return {
+            url,
+            magic,
+            version,
+            count,
+            blockSize,
+            pointsPerChunk,
+            chunkCount,
+            entrySize,
+            headerSize,
+            min: [view.getFloat32(32, true), view.getFloat32(36, true), view.getFloat32(40, true)],
+            scale: [view.getFloat32(44, true), view.getFloat32(48, true), view.getFloat32(52, true)],
+            chunks,
+        };
+    }
+
+    async loadManifest(url, signal, onBytes) {
+        const probeEnd = PNTS_HEADER_PROBE_BYTES - 1;
+        let bytes = await this._fetchRange(url, 0, probeEnd, signal, onBytes);
+        let manifest = this.parseManifest(bytes, url);
+        if (manifest.needBytes) {
+            bytes = await this._fetchRange(url, 0, manifest.needBytes - 1, signal, onBytes);
+            manifest = this.parseManifest(bytes, url);
+        }
+        return manifest;
+    }
+
+    async fetchChunk(state, index, signal, onBytes) {
+        const chunk = state.manifest.chunks[index];
+        const cached = await this.store.get(state.url, index, chunk.compressedSize);
+        if (cached) {
+            state.cachedBytes += cached.byteLength;
+            return { bytes: cached, fromCache: true };
+        }
+
+        const partial = state.partialChunks.get(index) || { parts: [], length: 0 };
+        let parts = partial.parts.slice();
+        let length = partial.length;
+        if (length > 0) state.partialResumeBytes += length;
+        if (length >= chunk.compressedSize) {
+            const bytes = concatUint8(parts, length);
+            state.partialChunks.delete(index);
+            await this.store.put(state.url, index, bytes);
+            return { bytes, fromCache: false };
+        }
+
+        const start = chunk.offset + length;
+        const end = chunk.offset + chunk.compressedSize - 1;
+        const resp = await fetch(state.url, {
+            signal,
+            priority: 'high',
+            headers: { Range: `bytes=${start}-${end}` },
+        });
+        if (resp.status !== 206) throw new Error(`Chunk range failed (${resp.status}) for ${state.url}`);
+        const reader = resp.body.getReader();
+        const abortReader = () => reader.cancel().catch(() => {});
+        if (signal) signal.addEventListener('abort', abortReader, { once: true });
+        try {
+            while (length < chunk.compressedSize) {
                 if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-                ensureCap(len + value.byteLength);
-                buf.set(value, len);
-                len += value.byteLength;
-
-                // Parse header once (44 bytes).
-                if (!header && len >= 44) {
-                    header = parsePntV4Header(buf.buffer, 0);
-                    cursor = 44;
-                    if (onHeader) onHeader(header);
-                }
-
-                // Drain as many complete blocks as have arrived since last iter.
-                while (header && blocksDecoded < header.numBlocks) {
-                    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-                    const bc = (blocksDecoded < header.numBlocks - 1)
-                        ? header.blockSize
-                        : (header.count - blocksDecoded * header.blockSize);
-                    const blockBytes = bc * 9;                 // SoA: 6 bytes pos + 3 bytes colour per point
-                    if (len - cursor < blockBytes) break;      // block still in-flight
-                    if (onBlock) onBlock(header, buf, cursor, bc, blocksDecoded);
-                    cursor += blockBytes;
-                    blocksDecoded++;
-                }
-
-                // Drop bytes that have already been parsed.  This keeps
-                // transient decompressed memory bounded by incoming chunks
-                // plus at most one incomplete block.
-                if (cursor > 0 && (cursor >= PNT_COMPACT_THRESHOLD || cursor > buf.length / 2)) {
-                    buf.copyWithin(0, cursor, len);
-                    len -= cursor;
-                    cursor = 0;
-                }
+                const { done, value } = await reader.read();
+                if (done) break;
+                parts.push(value);
+                length += value.byteLength;
+                state.networkBytes += value.byteLength;
+                state.partialChunks.set(index, { parts, length });
+                if (onBytes) onBytes(value.byteLength);
             }
         } finally {
             if (signal) signal.removeEventListener('abort', abortReader);
         }
 
-        if (onProgress) onProgress(100);
-        return { header: header ?? parsePntV4Header(buf.buffer, 0), blocksDecoded };
+        if (length !== chunk.compressedSize) {
+            state.partialChunks.set(index, { parts, length });
+            throw new DOMException('Aborted', 'AbortError');
+        }
+        const bytes = concatUint8(parts, length);
+        state.partialChunks.delete(index);
+        await this.store.put(state.url, index, bytes);
+        return { bytes, fromCache: false };
     }
+}
+
+async function decompressGzipBytes(bytes) {
+    if (!('DecompressionStream' in window)) {
+        throw new Error('This browser lacks DecompressionStream support for .pnts chunks');
+    }
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
 
@@ -1019,6 +1096,8 @@ class PointCloudViewer {
         this.activeUrl = null;
         this.activeAbort = null;
         this.activeLoadId = 0;
+        this.sceneStates = new Map();
+        this.currentState = null;
         this._pendingFlushRaf = null;
         this._interactionBudgetTimer = null;
         this._loadingBudget = false;
@@ -1374,7 +1453,6 @@ class PointCloudViewer {
         const loaded = this._loadedPoints || 0;
         if (!total || !loaded) return 0;
         let factor = this._baseSamplingRate;
-        if (this._loadingBudget) factor *= LOAD_POINT_BUDGET_FACTOR;
         if (this._interactionBudget) factor *= INTERACTION_POINT_BUDGET_FACTOR;
         const cap = Math.max(1, Math.floor(total * Math.max(0, Math.min(1, factor))));
         return Math.min(loaded, cap);
@@ -1464,275 +1542,372 @@ class PointCloudViewer {
         });
     }
 
-    // --- True streaming load + render ------------------------------------
-    //
-    // Every block the loader emits goes straight into the geometry:
-    //
-    //    1. `onHeader`  installs an empty full-sized geometry.  We can
-    //       do this because `computeXformFromHeader` derives the scene's
-    //       centre and bounding-sphere radius from the file's (min, scale)
-    //       directly — no points needed.
-    //
-    //    2. `onBlock`   decodes into the next `blockCount` slots of the
-    //       pre-allocated typed arrays, applies the same transform, and
-    //       marks the new slice dirty.  An rAF-batched flush commits
-    //       the dirty slice to the GPU with `BufferAttribute.updateRange`,
-    //       so each block pays a ~200 KB sub-upload instead of forcing
-    //       a whole-buffer re-upload (which would be O(N²) over N blocks).
-    //
-    // Net effect: the cloud visibly densifies in real time as bytes
-    // arrive.  Mid-load cancellation via `AbortController` leaves the
-    // partially-rendered scene displayed until the next `show` call.
-    // ---------------------------------------------------------------------
     showPreview(key, cfg) {
-        if (this.activeKey === key && this.pointCloud && this.activeQuality !== 'idle') return Promise.resolve();
-        return this._show(key, cfg, 'preview');
+        return this.showFull(key, cfg);
     }
 
     showFull(key, cfg) {
-        if (this.activeKey === key && (
-            this.activeQuality === 'loading-full' ||
-            this.activeQuality === 'full'
-        )) {
-            return Promise.resolve();
-        }
-        return this._show(key, cfg, 'full');
+        return this._activateState(key, cfg);
     }
 
-    async _show(key, cfg, quality) {
-        if (this.activeAbort) this.activeAbort.abort();
-        this._cancelPendingFlush();
-        const abort = new AbortController();
-        this.activeAbort = abort;
+    _getState(key, cfg) {
+        let state = this.sceneStates.get(key);
+        if (!state) {
+            state = {
+                key,
+                cfg,
+                url: cfg.cloud,
+                manifest: null,
+                positions: null,
+                colors: null,
+                xform: null,
+                geometry: null,
+                pointCloud: null,
+                loadedChunks: null,
+                loadedChunkCount: 0,
+                contiguousChunks: 0,
+                loadedPoints: 0,
+                visiblePoints: 0,
+                revealed: false,
+                abort: null,
+                loadPromise: null,
+                loadId: 0,
+                status: 'idle',
+                partialChunks: new Map(),
+                networkBytes: 0,
+                cachedBytes: 0,
+                partialResumeBytes: 0,
+                redownloadedChunks: 0,
+                view: null,
+                lastActive: 0,
+            };
+            this.sceneStates.set(key, state);
+        }
+        state.cfg = cfg;
+        state.url = cfg.cloud;
+        return state;
+    }
+
+    _captureStateView(state) {
+        if (!state || !state.pointCloud || this.pointCloud !== state.pointCloud) return;
+        state.view = this._captureViewState();
+    }
+
+    _abortStateStream(state) {
+        if (!state?.abort || state.abort.signal.aborted) return;
+        state.abort.abort();
+        if (state.status === 'loading' || state.status === 'streaming') {
+            state.status = 'aborted';
+            this._updatePerf({ abortedLoads: window.__UNIT_DEMO_PERF.abortedLoads + 1 });
+        }
+    }
+
+    _detachCurrentState(nextKey) {
+        const state = this.currentState;
+        if (!state || state.key === nextKey) return;
+        this._captureStateView(state);
+        this._abortStateStream(state);
+        if (state.pointCloud?.parent === this.scene) {
+            this.scene.remove(state.pointCloud);
+        }
+        this.pointCloud = null;
+        this.currentState = null;
+        this.clearMeasurement();
+        this._updatePerf({ livePointClouds: 0 });
+    }
+
+    async _activateState(key, cfg) {
+        if (!cfg?.cloud) return;
+        this._detachCurrentState(key);
+        const state = this._getState(key, cfg);
+        state.lastActive = Date.now();
+
+        this.currentState = state;
         this.activeKey = key;
-        this.activeQuality = quality === 'full' ? 'loading-full' : 'loading-preview';
-        const loadId = ++this.activeLoadId;
+        this.activeQuality = state.status === 'ready' ? 'full' : 'loading-full';
+        this.activeUrl = state.url;
         this._baseSamplingRate = Math.max(0, Math.min(1, cfg.samplingRate != null ? cfg.samplingRate : 1));
-        this._loadingBudget = quality === 'full';
+        this._loadingBudget = false;
         this._interactionBudget = false;
 
-        this.setMessage(quality === 'full' ? 'Loading…' : 'Loading preview…');
-        this._updatePerf({
-            activeScene: key,
-            activeLoadId: loadId,
-            activeUrl: quality === 'full' ? cfg.cloud : (cfg.preview || cfg.cloud),
-            loading: true,
-            status: quality === 'full' ? 'loading' : 'preview-loading',
-        });
+        if (state.pointCloud) {
+            this.pointCloud = state.pointCloud;
+            if (state.pointCloud.parent !== this.scene) this.scene.add(state.pointCloud);
+            this._totalPoints = state.manifest?.count || state.loadedPoints || 0;
+            this._loadedPoints = state.loadedPoints || 0;
+            this.setPointSize(cfg.pointSize);
+            if (cfg.brightness != null) this.setBrightness(cfg.brightness);
+            if (cfg.background) this.setBackground(cfg.background);
+            if (state.view) this._restoreViewState(state.view);
+            this._commitStateProgress(state);
+        } else {
+            this.setMessage('Loading…');
+        }
 
-        const isStale = () => abort.signal.aborted || this.activeKey !== key || this.activeLoadId !== loadId;
+        this._startOrResumeState(state);
+        this._trimInactiveStates();
+    }
 
-        const loadIntoViewer = async (url, phase) => {
-            if (isStale()) return false;
-            const isPreview = phase === 'preview';
-            // Keep the currently visible preview/LOD on screen while a higher
-            // quality file decodes, then swap once. This avoids the visible
-            // reset from an empty geometry back to a sparse cloud.
-            const deferInstall = quality === 'full' && !isPreview && !!this.pointCloud;
-            this._loadingBudget = !isPreview && !deferInstall;
-            this._updatePerf({ activeUrl: url, status: phase });
-
-            // Per-load state captured in closure so a later show() call
-            // cannot race-write this scene's buffers.
-            let positions = null;
-            let colors = null;
-            let xform = null;           // {cx, cy, cz, flipY, radius}
-            let writeOffset = 0;        // next unfilled point slot
-            let flushedUpTo = 0;        // slots already committed to GPU
-            let flushScheduled = false;
-            let firstBlockRendered = false;
-            let deferredHeader = null;
-            const geomRef = { current: null };   // the geometry we're filling
-
-            const scheduleFlush = () => {
-                if (flushScheduled || isStale()) return;
-                flushScheduled = true;
-                this._pendingFlushRaf = requestAnimationFrame(() => {
-                    this._pendingFlushRaf = null;
-                    flushScheduled = false;
-                    if (isStale()) return;
-                    const geo = geomRef.current;
-                    if (!geo || geo !== this.pointCloud?.geometry) return;
-                    const from = flushedUpTo;
-                    const to = writeOffset;
-                    if (from >= to) return;
-                    // Sub-upload just the newly-filled slice.  updateRange is
-                    // in *scalar* units (3 floats per point for position,
-                    // 3 bytes per point for colour).
-                    const posAttr = geo.getAttribute('position');
-                    const colAttr = geo.getAttribute('color');
-                    posAttr.updateRange.offset = from * 3;
-                    posAttr.updateRange.count  = (to - from) * 3;
-                    posAttr.needsUpdate = true;
-                    colAttr.updateRange.offset = from * 3;
-                    colAttr.updateRange.count  = (to - from) * 3;
-                    colAttr.needsUpdate = true;
-                    flushedUpTo = to;
-                    this._applyDrawBudget();
-                });
-            };
-
-            const onHeader = (header) => {
-                if (isStale()) return;
-                positions = new Float32Array(header.count * 3);
-                colors    = new Uint8Array(header.count * 3);
-                xform = computeXformFromHeader(header, cfg);
-                if (deferInstall) {
-                    deferredHeader = header;
-                    this._updatePerf({
-                        refinementTotalPoints: header.count,
-                        refinementLoadedPoints: 0,
-                    });
-                    return;
-                }
-                const previousView = this._captureViewState();
-                this._cancelPendingFlush();
-                // Install an empty geometry (drawRange=0); blocks fill it.
-                geomRef.current = this._installGeometry(
-                    positions, colors, header.count, 0, cfg, xform.radius
-                );
-                this.activeUrl = url;
-                this._totalPoints = header.count;
-                this._loadedPoints = 0;
-                this._updatePerf({
-                    totalPoints: header.count,
-                    loadedPoints: 0,
-                    visiblePoints: 0,
-                    livePointClouds: this.pointCloud ? 1 : 0,
-                });
-                if (previousView && quality === 'full') {
-                    this._restoreViewState(previousView);
-                }
-            };
-
-            const onBlock = (header, bytes, byteOffset, blockCount) => {
-                if (isStale()) return;
-                decodeBlock(bytes, byteOffset, blockCount, positions, colors,
-                            writeOffset, header);
-                applyTransform(positions, writeOffset, blockCount, xform);
-                writeOffset += blockCount;
-                if (deferInstall) {
-                    this._updatePerf({ refinementLoadedPoints: writeOffset });
-                    if (!firstBlockRendered) {
-                        firstBlockRendered = true;
-                        this.setMessage('Refining…');
-                    }
-                    return;
-                }
-                this._loadedPoints = writeOffset;
-                if (!firstBlockRendered) {
-                    firstBlockRendered = true;
-                    this.setMessage(isPreview ? '' : 'Refining…');
-                }
-                scheduleFlush();
-            };
-
-            const onProgress = (pct) => {
-                if (isStale() || firstBlockRendered) return;
-                this.setMessage(isPreview ? `Preview ${pct}%` : `Loading ${pct}%`);
-            };
-
-            await this.loader.load(url, {
-                signal: abort.signal, onHeader, onBlock, onProgress
-            });
-            if (isStale()) return false;
-
-            if (deferInstall) {
-                if (!deferredHeader) return false;
-                const previousView = this._captureViewState();
-                this._cancelPendingFlush();
-                geomRef.current = this._installGeometry(
-                    positions, colors, deferredHeader.count, writeOffset, cfg, xform.radius
-                );
-                this.activeUrl = url;
-                this._totalPoints = deferredHeader.count;
-                this._loadedPoints = writeOffset;
-                this._loadingBudget = false;
-                this._interactionBudget = false;
-                this._applyDrawBudget();
-                if (previousView) this._restoreViewState(previousView);
-                this._updatePerf({
-                    refinementTotalPoints: 0,
-                    refinementLoadedPoints: 0,
-                    livePointClouds: this.pointCloud ? 1 : 0,
-                });
-                return true;
-            }
-
-            // Commit any residual slots that had not flushed yet.
-            if (writeOffset > flushedUpTo) scheduleFlush();
-            return true;
+    _ensureStateGeometry(state) {
+        if (state.pointCloud || !state.manifest) return;
+        const header = {
+            count: state.manifest.count,
+            blockSize: state.manifest.blockSize,
+            numBlocks: Math.ceil(state.manifest.count / state.manifest.blockSize),
+            min: state.manifest.min,
+            scale: state.manifest.scale,
         };
+        state.positions = new Float32Array(state.manifest.count * 3);
+        state.colors = new Uint8Array(state.manifest.count * 3);
+        state.loadedChunks = new Uint8Array(state.manifest.chunkCount);
+        state.xform = computeXformFromHeader(header, state.cfg);
+        this._cancelPendingFlush();
+        state.geometry = this._installGeometry(
+            state.positions, state.colors, state.manifest.count, 0, state.cfg, state.xform.radius
+        );
+        state.pointCloud = this.pointCloud;
+        state.pointCloud.visible = false;
+        this._totalPoints = state.manifest.count;
+        this._loadedPoints = 0;
+        if (state.view) this._restoreViewState(state.view);
+    }
 
+    _startOrResumeState(state) {
+        if (state.status === 'ready') {
+            this.setMessage('');
+            this._updatePerf({ loading: false, status: 'ready' });
+            return;
+        }
+        if (state.loadPromise && !state.abort?.signal.aborted) return state.loadPromise;
+
+        this._baseSamplingRate = Math.max(0, Math.min(1, state.cfg.samplingRate != null ? state.cfg.samplingRate : 1));
+        this._interactionBudget = false;
+        const abort = new AbortController();
+        state.abort = abort;
+        const loadId = ++state.loadId;
+        this.activeAbort = abort;
+        this.activeLoadId += 1;
+        state.status = state.manifest ? 'streaming' : 'loading';
+
+        this._updatePerf({
+            activeScene: state.key,
+            activeLoadId: this.activeLoadId,
+            activeUrl: state.url,
+            loading: true,
+            status: state.status,
+            visiblePoints: state.visiblePoints || 0,
+            loadedPoints: state.loadedPoints || 0,
+            totalPoints: state.manifest?.count || 0,
+            loadedChunkCount: state.loadedChunkCount || 0,
+            totalChunkCount: state.manifest?.chunkCount || 0,
+            livePointClouds: this.pointCloud ? 1 : 0,
+            networkBytes: state.networkBytes,
+            cachedBytes: state.cachedBytes,
+            partialResumeBytes: state.partialResumeBytes,
+            redownloadedChunks: state.redownloadedChunks,
+        });
+        state.loadPromise = this._streamState(state, loadId, abort)
+            .finally(() => {
+                if (state.loadId === loadId) {
+                    state.loadPromise = null;
+                    state.abort = null;
+                    if (this.currentState === state) this.activeAbort = null;
+                }
+            });
+        return state.loadPromise;
+    }
+
+    async _streamState(state, loadId, abort) {
+        const isStale = () => abort.signal.aborted || state.loadId !== loadId;
         try {
-            if (quality === 'preview') {
-                const previewUrl = cfg.preview || cfg.lods?.[0] || cfg.cloud;
-                const previewOk = await loadIntoViewer(previewUrl, 'preview');
-                if (!previewOk) return;
-                await new Promise(resolve => requestAnimationFrame(resolve));
-                if (isStale()) return;
-                this._loadingBudget = false;
-                this._interactionBudget = false;
-                this._applyDrawBudget();
-                this.setMessage('');
-                this.activeQuality = 'preview';
-                this._updatePerf({
-                    loading: false,
-                    status: 'preview-ready',
-                    completedLoads: window.__UNIT_DEMO_PERF.completedLoads + 1,
+            if (!state.manifest) {
+                this.setMessage('Loading…');
+                state.manifest = await this.loader.loadManifest(state.url, abort.signal, (n) => {
+                    state.networkBytes += n;
                 });
-                return;
-            }
-
-            const lods = Array.isArray(cfg.lods) && cfg.lods.length
-                ? cfg.lods
-                : (cfg.preview && cfg.preview !== cfg.cloud ? [cfg.preview] : []);
-            for (const [i, lodUrl] of lods.entries()) {
-                if (lodUrl === this.activeUrl && this.activeKey === key && this.pointCloud) continue;
-                const lodOk = await loadIntoViewer(lodUrl, i === 0 ? 'preview' : `lod-${i}`);
-                if (!lodOk) return;
-                await new Promise(resolve => requestAnimationFrame(resolve));
                 if (isStale()) return;
-                this.setMessage('Refining…');
+                this._ensureStateGeometry(state);
+                this._updatePerf({
+                    totalPoints: state.manifest.count,
+                    totalChunkCount: state.manifest.chunkCount,
+                    livePointClouds: this.currentState === state && this.pointCloud ? 1 : 0,
+                });
+            } else {
+                this._ensureStateGeometry(state);
             }
 
-            const fullOk = await loadIntoViewer(cfg.cloud, 'full');
-            if (!fullOk) return;
-            await new Promise(resolve => requestAnimationFrame(resolve));
+            state.status = 'streaming';
+            this._commitStateProgress(state);
+
+            let nextToSchedule = 0;
+            const active = new Map();
+            const schedule = () => {
+                while (active.size < CHUNK_FETCH_WINDOW && nextToSchedule < state.manifest.chunkCount) {
+                    const idx = nextToSchedule++;
+                    if (state.loadedChunks[idx]) continue;
+                    active.set(idx, this._loadChunk(state, idx, abort.signal)
+                        .then(() => idx)
+                        .finally(() => active.delete(idx)));
+                }
+            };
+
+            while (!isStale()) {
+                schedule();
+                if (!active.size) break;
+                await Promise.race(active.values());
+            }
             if (isStale()) return;
 
-            this._loadingBudget = false;
-            this._interactionBudget = false;
-            this._applyDrawBudget();
-            this.setMessage('');
+            state.status = 'ready';
+            state.revealed = true;
             this.activeQuality = 'full';
+            this.setMessage('');
+            this._commitStateProgress(state);
             this._updatePerf({
                 loading: false,
                 status: 'ready',
                 completedLoads: window.__UNIT_DEMO_PERF.completedLoads + 1,
             });
-            // Emit a one-shot "ready" event so external controllers (e.g.
-            // the settings panel) can sync their UI to the just-loaded
-            // scene's values.
-            if (this.onSceneReady) this.onSceneReady(key, cfg);
+            if (this.onSceneReady && this.currentState === state) {
+                this.onSceneReady(state.key, state.cfg);
+            }
         } catch (err) {
             if (err.name === 'AbortError' || abort.signal.aborted) {
-                this._cancelPendingFlush();
-                this._updatePerf({
-                    abortedLoads: window.__UNIT_DEMO_PERF.abortedLoads + 1,
-                    status: this.activeLoadId === loadId ? 'aborted' : window.__UNIT_DEMO_PERF.status,
-                    loading: this.activeLoadId === loadId ? false : window.__UNIT_DEMO_PERF.loading,
-                });
+                if (state.status === 'loading' || state.status === 'streaming') state.status = 'aborted';
+                if (this.currentState === state) this._updatePerf({ loading: false, status: 'aborted' });
                 return;
             }
             console.error('Error loading point cloud:', err);
-            this.setMessage('Failed to load point cloud');
-            this._updatePerf({ loading: false, status: 'error' });
-        } finally {
-            if (this.activeLoadId === loadId) {
-                this.activeAbort = null;
+            state.status = 'error';
+            if (this.currentState === state) {
+                this.setMessage('Failed to load point cloud');
+                this._updatePerf({ loading: false, status: 'error' });
             }
         }
+    }
+
+    async _loadChunk(state, index, signal) {
+        if (state.loadedChunks[index]) return;
+        const { bytes } = await this.loader.fetchChunk(state, index, signal);
+        if (signal?.aborted || state.loadedChunks[index]) return;
+        const raw = await decompressGzipBytes(bytes);
+        if (signal?.aborted || state.loadedChunks[index]) return;
+        this._decodeChunkIntoState(state, index, raw);
+        state.loadedChunks[index] = 1;
+        state.loadedChunkCount += 1;
+        this._commitStateProgress(state, index);
+    }
+
+    _decodeChunkIntoState(state, index, raw) {
+        const chunk = state.manifest.chunks[index];
+        const header = {
+            min: state.manifest.min,
+            scale: state.manifest.scale,
+            blockSize: state.manifest.blockSize,
+            count: state.manifest.count,
+        };
+        let offset = 0;
+        let writeOffset = chunk.firstPoint;
+        let remaining = chunk.pointCount;
+        while (remaining > 0) {
+            const blockCount = Math.min(state.manifest.blockSize, remaining);
+            decodeBlock(raw, offset, blockCount, state.positions, state.colors, writeOffset, header);
+            offset += blockCount * 9;
+            writeOffset += blockCount;
+            remaining -= blockCount;
+        }
+        applyTransform(state.positions, chunk.firstPoint, chunk.pointCount, state.xform);
+    }
+
+    _firstPaintTarget(state) {
+        const sampling = Math.max(0.01, this._baseSamplingRate || 1);
+        const targetLoaded = Math.ceil(FIRST_PAINT_VISIBLE_POINTS / sampling);
+        return Math.min(state.manifest.count, targetLoaded);
+    }
+
+    _commitStateProgress(state, dirtyChunkIndex = null) {
+        while (state.contiguousChunks < state.manifest.chunkCount &&
+               state.loadedChunks[state.contiguousChunks]) {
+            state.contiguousChunks += 1;
+        }
+        const contiguousPoints = state.contiguousChunks >= state.manifest.chunkCount
+            ? state.manifest.count
+            : state.manifest.chunks[state.contiguousChunks]?.firstPoint || 0;
+        state.loadedPoints = contiguousPoints;
+        this._totalPoints = state.manifest.count;
+        this._loadedPoints = contiguousPoints;
+
+        if (dirtyChunkIndex != null && state.geometry && this.currentState === state) {
+            const chunk = state.manifest.chunks[dirtyChunkIndex];
+            const posAttr = state.geometry.getAttribute('position');
+            const colAttr = state.geometry.getAttribute('color');
+            posAttr.updateRange.offset = chunk.firstPoint * 3;
+            posAttr.updateRange.count = chunk.pointCount * 3;
+            posAttr.needsUpdate = true;
+            colAttr.updateRange.offset = chunk.firstPoint * 3;
+            colAttr.updateRange.count = chunk.pointCount * 3;
+            colAttr.needsUpdate = true;
+        }
+
+        if (!state.revealed && contiguousPoints >= this._firstPaintTarget(state)) {
+            state.revealed = true;
+            if (state.pointCloud) state.pointCloud.visible = true;
+            this.setMessage('');
+        } else if (!state.revealed && this.currentState === state) {
+            this.setMessage('Loading…');
+        }
+
+        if (state.pointCloud) {
+            const visible = state.revealed ? this._visiblePointCap() : 0;
+            state.pointCloud.geometry.setDrawRange(0, visible);
+            state.visiblePoints = visible;
+        }
+
+        if (this.currentState === state) {
+            this._updatePerf({
+                activeScene: state.key,
+                activeUrl: state.url,
+                loading: state.status !== 'ready',
+                status: state.status,
+                visiblePoints: state.visiblePoints,
+                loadedPoints: state.loadedPoints,
+                totalPoints: state.manifest.count,
+                loadedChunkCount: state.loadedChunkCount,
+                totalChunkCount: state.manifest.chunkCount,
+                networkBytes: state.networkBytes,
+                cachedBytes: state.cachedBytes,
+                partialResumeBytes: state.partialResumeBytes,
+                redownloadedChunks: state.redownloadedChunks,
+                livePointClouds: this.pointCloud ? 1 : 0,
+            });
+        }
+    }
+
+    _disposeDecodedState(state) {
+        if (!state || state === this.currentState) return;
+        if (state.pointCloud) {
+            state.pointCloud.parent?.remove(state.pointCloud);
+            state.pointCloud.geometry.dispose();
+            state.pointCloud.material.dispose();
+        }
+        state.positions = null;
+        state.colors = null;
+        state.geometry = null;
+        state.pointCloud = null;
+        state.loadedChunks = null;
+        state.loadedChunkCount = 0;
+        state.contiguousChunks = 0;
+        state.loadedPoints = 0;
+        state.visiblePoints = 0;
+        state.revealed = false;
+        if (state.status !== 'ready') state.status = 'idle';
+    }
+
+    _trimInactiveStates() {
+        const inactive = Array.from(this.sceneStates.values())
+            .filter(s => s !== this.currentState && s.pointCloud && !s.loadPromise)
+            .sort((a, b) => b.lastActive - a.lastActive);
+        inactive.slice(1).forEach(s => this._disposeDecodedState(s));
     }
 
     // Runtime setters used by the view controls panel.  All of them no-op
@@ -2236,7 +2411,6 @@ class ViewerControls {
             `${this.currentKey}: {`,
             `    title: ${JSON.stringify(cfg.title || this.currentKey)},`,
             `    cloud: ${JSON.stringify(cfg.cloud)},`,
-            cfg.preview ? `    preview: ${JSON.stringify(cfg.preview)},` : null,
             `    pointSize: ${(+cfg.pointSize).toFixed(4)},`,
             `    flipY: ${!!cfg.flipY},`,
             `    camera: { x: ${cam.x.toFixed(3)}, y: ${cam.y.toFixed(3)}, z: ${cam.z.toFixed(3)} },`,
