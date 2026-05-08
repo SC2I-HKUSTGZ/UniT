@@ -2,7 +2,7 @@
    UniT project page — interactive examples
    Chapter nav + PNT v4 point-cloud viewer + video+cover sync
 
-   Loading strategy (lazy init + true streaming + cached)
+   Loading strategy (lazy init + true streaming + bounded memory)
    -----------------------------------------------------
    Each scene is served as a gzipped .pnt.gz v4 file.  The payload is
    split into fixed-size blocks of 16 384 points; the entire cloud was
@@ -20,9 +20,9 @@
        arrived so far is still a usable visualisation.
 
    Implementation:
-     - `DecompressionStream('gzip')` feeds a grow-doubling scratch
-       buffer.  A parser walks it block-by-block, emitting `onBlock`
-       callbacks the instant each block has fully arrived.
+     - `DecompressionStream('gzip')` feeds a rolling scratch buffer.  A
+       parser walks it block-by-block, emitting `onBlock` callbacks the
+       instant each block has fully arrived, then drops consumed bytes.
      - The viewer preallocates the final-size position / colour arrays
        on header, installs an empty geometry (drawRange=0), then
        appends each block in place.  `BufferAttribute.updateRange`
@@ -38,14 +38,15 @@
      - The whole viewer is lazy-started only when the user explicitly
        opens or interacts with the Examples section.  This keeps the
        project page and Results section cheap to open.
-     - `Cache API` under the name "unit-pnt-v4": first visit pays the
-       network cost, every subsequent visit is an instant memory read.
+     - Scene switches abort the active fetch/decompress/read loop and
+       stale GPU flushes so old loads cannot build up behind the current
+       thumbnail.
    ======================================== */
 
 document.addEventListener('DOMContentLoaded', () => {
     initNavigation();
     initIntroVideo();   // lazy-loads intro.mp4 only when it scrolls into view
-    evictStaleCaches(); // removes unit-pnt-v1..v9, frees up to ~1.5 GB per user
+    evictStaleCaches(); // removes stale unit-pnt-* caches from older viewer builds
     initDeferredDemo(); // starts Three.js only after explicit Examples intent
 });
 
@@ -259,6 +260,7 @@ const DEMO_CONFIGS = {
     hkust_intr: {
         title: 'HKUST (GZ) INTR',
         cloud: 'assets/demos/hkust_intr/scene.pnt.gz',
+        preview: 'assets/demos/hkust_intr/preview.pnt.gz',
         pointSize: 0.012007,
         flipY: true,
         camera: { x: -0.489, y: 0.244, z: -1.140 },
@@ -270,6 +272,7 @@ const DEMO_CONFIGS = {
     hkust_toy: {
         title: 'HKUST (GZ) Toy',
         cloud: 'assets/demos/hkust_toy/scene.pnt.gz',
+        preview: 'assets/demos/hkust_toy/preview.pnt.gz',
         pointSize: 0.000001,
         flipY: true,
         camera: { x: -0.400, y: 0.200, z: -1.500 },
@@ -281,6 +284,7 @@ const DEMO_CONFIGS = {
     hkust_redbird: {
         title: 'HKUST (GZ) Red Bird',
         cloud: 'assets/demos/hkust_redbird/scene.pnt.gz',
+        preview: 'assets/demos/hkust_redbird/preview.pnt.gz',
         pointSize: 0.0000,
         flipY: true,
         camera: { x: -0.349, y: 0.244, z: -1.117 },
@@ -292,6 +296,7 @@ const DEMO_CONFIGS = {
     drift: {
         title: 'Drift',
         cloud: 'assets/demos/drift/scene.pnt.gz',
+        preview: 'assets/demos/drift/preview.pnt.gz',
         pointSize: 0.000001,
         flipY: true,
         camera: { x: -0.250, y: 0.250, z: -0.750 },
@@ -303,6 +308,7 @@ const DEMO_CONFIGS = {
     gta_sfm: {
         title: 'GTA SfM',
         cloud: 'assets/demos/gta_sfm/scene.pnt.gz',
+        preview: 'assets/demos/gta_sfm/preview.pnt.gz',
         pointSize: 0.000001,
         flipY: true,
         camera: { x: -0.361, y: 0.180, z: -1.263 },
@@ -314,6 +320,7 @@ const DEMO_CONFIGS = {
     kitti: {
         title: 'KITTI',
         cloud: 'assets/demos/kitti/scene.pnt.gz',
+        preview: 'assets/demos/kitti/preview.pnt.gz',
         pointSize: 0.103814,
         flipY: true,
         camera: { x: -0.308, y: 0.451, z: -1.025 },
@@ -328,7 +335,27 @@ const DEMO_CONFIGS = {
 // defaults are discarded in favour of the new DEMO_CONFIGS values.
 const CONTROLS_STORAGE_KEY = 'unit-demo-controls-v2';
 
-const CACHE_NAME = 'unit-pnt-v10';
+const CACHE_NAME = 'unit-pnt-v11';
+
+const LOAD_POINT_BUDGET_FACTOR = 0.65;
+const INTERACTION_POINT_BUDGET_FACTOR = 0.45;
+const INTERACTION_BUDGET_SETTLE_MS = 450;
+const PNT_COMPACT_THRESHOLD = 1 << 20;
+
+window.__UNIT_DEMO_PERF = window.__UNIT_DEMO_PERF || {
+    activeScene: null,
+    activeLoadId: 0,
+    activeUrl: null,
+    loading: false,
+    abortedLoads: 0,
+    completedLoads: 0,
+    livePointClouds: 0,
+    activeThumbTimers: 0,
+    visiblePoints: 0,
+    loadedPoints: 0,
+    totalPoints: 0,
+    status: 'idle'
+};
 
 const DEMO_DEPENDENCY_SCRIPTS = [
     'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js',
@@ -551,6 +578,7 @@ async function initDemo() {
         activeThumbLoopTimer = setInterval(() => {
             maintainActiveThumbLoop(v, token);
         }, 250);
+        window.__UNIT_DEMO_PERF.activeThumbTimers = 1;
     };
 
     const getSelectedVideo = () => {
@@ -587,8 +615,6 @@ async function initDemo() {
             maintainActiveThumbLoop(v, token);
         };
         start();                                            // kick off loading + play
-        v.addEventListener('loadeddata', start, { once: true });
-        v.addEventListener('canplay',    start, { once: true });
         thumbVisibility.observe(v);
     }
 
@@ -617,6 +643,8 @@ async function initDemo() {
                     setTimeout(() => maintainActiveThumbLoop(v), 0);
                 }
             });
+            v.addEventListener('loadeddata', () => maintainActiveThumbLoop(v));
+            v.addEventListener('canplay', () => maintainActiveThumbLoop(v));
             v.addEventListener('stalled', () => maintainActiveThumbLoop(v));
             v.addEventListener('suspend', () => maintainActiveThumbLoop(v));
             v.addEventListener('timeupdate', () => {
@@ -640,8 +668,9 @@ async function initDemo() {
 //        - onHeader(header)                                    (44 bytes in)
 //        - onBlock(header, bytes, byteOffset, blockCount, blockIdx)
 //                                                              (every 9*bc bytes)
-//      Each callback receives a typed-array view into a single grow-
-//      doubling Uint8Array, so there is no per-chunk copy.
+//      Each callback receives a typed-array view into a rolling buffer;
+//      consumed bytes are compacted away so the full decompressed file is
+//      never retained alongside the final GPU buffers.
 // ========================================
 class PntLoader {
     constructor(cacheName) {
@@ -655,10 +684,14 @@ class PntLoader {
         catch { return null; }
     }
 
-    // Fetch compressed bytes (cache-then-network). Options are left at
-    // defaults so normal HTTP-cache hits work for any mode/credentials,
-    // unlike the preload cache which is finicky about matching.
+    // Fetch compressed bytes (cache-then-network). Foreground loads do
+    // not clone responses into Cache API: a clone keeps downloading even
+    // after the visible load is aborted, which is exactly the hidden work
+    // that makes rapid scene switching accumulate resources. Browser HTTP
+    // cache still handles repeat visits; explicit prefetch() remains
+    // available for future non-interactive warming.
     async _fetchCompressed(url, signal) {
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
         const cache = await this._openCache();
         if (cache) {
             const hit = await cache.match(url);
@@ -668,9 +701,6 @@ class PntLoader {
         // browsers that don't support it just ignore the hint.
         const resp = await fetch(url, { signal, priority: 'high' });
         if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${url}`);
-        // Clone BEFORE the body is consumed; the clone goes into the
-        // cache, the original is returned for decompression.
-        if (cache) cache.put(url, resp.clone()).catch(() => {});
         return resp;
     }
 
@@ -708,6 +738,7 @@ class PntLoader {
     // Streaming load with per-block callbacks.
     async load(url, { signal, onHeader, onBlock, onProgress } = {}) {
         const resp = await this._fetchCompressed(url, signal);
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
         // Progress bar uses compressed-byte count when we can see it;
         // otherwise (Cache API responses don't always expose content-
@@ -733,6 +764,14 @@ class PntLoader {
             .pipeThrough(progressStream)
             .pipeThrough(new DecompressionStream('gzip'));
         const reader = stream.getReader();
+        const abortReader = () => reader.cancel().catch(() => {});
+        if (signal) {
+            if (signal.aborted) {
+                abortReader();
+                throw new DOMException('Aborted', 'AbortError');
+            }
+            signal.addEventListener('abort', abortReader, { once: true });
+        }
 
         let buf = new Uint8Array(1 << 16);   // grow-doubling scratch
         let len = 0;
@@ -751,36 +790,51 @@ class PntLoader {
             buf = next;
         };
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            ensureCap(len + value.byteLength);
-            buf.set(value, len);
-            len += value.byteLength;
+        try {
+            while (true) {
+                if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+                const { done, value } = await reader.read();
+                if (done) break;
+                if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+                ensureCap(len + value.byteLength);
+                buf.set(value, len);
+                len += value.byteLength;
 
-            // Parse header once (44 bytes).
-            if (!header && len >= 44) {
-                header = parsePntV4Header(buf.buffer, 0);
-                cursor = 44;
-                if (onHeader) onHeader(header);
-            }
+                // Parse header once (44 bytes).
+                if (!header && len >= 44) {
+                    header = parsePntV4Header(buf.buffer, 0);
+                    cursor = 44;
+                    if (onHeader) onHeader(header);
+                }
 
-            // Drain as many complete blocks as have arrived since last iter.
-            while (header && blocksDecoded < header.numBlocks) {
-                const bc = (blocksDecoded < header.numBlocks - 1)
-                    ? header.blockSize
-                    : (header.count - blocksDecoded * header.blockSize);
-                const blockBytes = bc * 9;                 // SoA: 6 bytes pos + 3 bytes colour per point
-                if (len - cursor < blockBytes) break;      // block still in-flight
-                if (onBlock) onBlock(header, buf, cursor, bc, blocksDecoded);
-                cursor += blockBytes;
-                blocksDecoded++;
+                // Drain as many complete blocks as have arrived since last iter.
+                while (header && blocksDecoded < header.numBlocks) {
+                    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+                    const bc = (blocksDecoded < header.numBlocks - 1)
+                        ? header.blockSize
+                        : (header.count - blocksDecoded * header.blockSize);
+                    const blockBytes = bc * 9;                 // SoA: 6 bytes pos + 3 bytes colour per point
+                    if (len - cursor < blockBytes) break;      // block still in-flight
+                    if (onBlock) onBlock(header, buf, cursor, bc, blocksDecoded);
+                    cursor += blockBytes;
+                    blocksDecoded++;
+                }
+
+                // Drop bytes that have already been parsed.  This keeps
+                // transient decompressed memory bounded by incoming chunks
+                // plus at most one incomplete block.
+                if (cursor > 0 && (cursor >= PNT_COMPACT_THRESHOLD || cursor > buf.length / 2)) {
+                    buf.copyWithin(0, cursor, len);
+                    len -= cursor;
+                    cursor = 0;
+                }
             }
+        } finally {
+            if (signal) signal.removeEventListener('abort', abortReader);
         }
 
-        const tight = buf.subarray(0, len);
         if (onProgress) onProgress(100);
-        return { header: header ?? parsePntV4Header(tight.buffer, 0), bytes: tight };
+        return { header: header ?? parsePntV4Header(buf.buffer, 0), blocksDecoded };
     }
 }
 
@@ -911,6 +965,13 @@ class PointCloudViewer {
         this.pointCloud = null;
         this.activeKey = null;
         this.activeAbort = null;
+        this.activeLoadId = 0;
+        this._pendingFlushRaf = null;
+        this._interactionBudgetTimer = null;
+        this._loadingBudget = false;
+        this._interactionBudget = false;
+        this._baseSamplingRate = 1;
+        this._loadedPoints = 0;
 
         // Measurement state
         this.measureMode = false;
@@ -956,6 +1017,9 @@ class PointCloudViewer {
         // orientation.  Zoom (wheel) and pan (right-click) stay on
         // OrbitControls since they don't affect that invariant.
         this.controls.enableRotate = false;
+        this.controls.addEventListener('start', () => this._beginInteractionBudget());
+        this.controls.addEventListener('end', () => this._endInteractionBudgetSoon());
+        this.canvas.addEventListener('wheel', () => this._markInteractionActive(), { passive: true });
 
         // Callback invoked whenever drag-rotation updates the cloud's
         // orientation; ViewerControls wires this up to keep its sliders
@@ -999,6 +1063,7 @@ class PointCloudViewer {
             startX = lastX = e.clientX;
             startY = lastY = e.clientY;
             moved = false;
+            this._beginInteractionBudget();
             try { this.canvas.setPointerCapture(pid); } catch {}
         });
 
@@ -1012,6 +1077,7 @@ class PointCloudViewer {
             const dy = e.clientY - lastY;
             lastX = e.clientX;
             lastY = e.clientY;
+            this._markInteractionActive();
 
             const rect = this.canvas.getBoundingClientRect();
             // Full-width drag ≈ one full yaw turn; full-height ≈ one
@@ -1047,6 +1113,7 @@ class PointCloudViewer {
         const end = (e) => {
             if (!dragging || e.pointerId !== pid) return;
             dragging = false;
+            this._endInteractionBudgetSoon();
             try { this.canvas.releasePointerCapture(pid); } catch {}
             pid = null;
         };
@@ -1245,6 +1312,62 @@ class PointCloudViewer {
         }
     }
 
+    _updatePerf(partial) {
+        Object.assign(window.__UNIT_DEMO_PERF, partial);
+    }
+
+    _visiblePointCap() {
+        const total = this._totalPoints || 0;
+        const loaded = this._loadedPoints || 0;
+        if (!total || !loaded) return 0;
+        let factor = this._baseSamplingRate;
+        if (this._loadingBudget) factor *= LOAD_POINT_BUDGET_FACTOR;
+        if (this._interactionBudget) factor *= INTERACTION_POINT_BUDGET_FACTOR;
+        const cap = Math.max(1, Math.floor(total * Math.max(0, Math.min(1, factor))));
+        return Math.min(loaded, cap);
+    }
+
+    _applyDrawBudget() {
+        if (!this.pointCloud) return;
+        const visible = this._visiblePointCap();
+        this.pointCloud.geometry.setDrawRange(0, visible);
+        this._updatePerf({
+            visiblePoints: visible,
+            loadedPoints: this._loadedPoints,
+            totalPoints: this._totalPoints,
+            loading: this._loadingBudget,
+        });
+    }
+
+    _beginInteractionBudget() {
+        if (!this.pointCloud) return;
+        if (this._interactionBudgetTimer) clearTimeout(this._interactionBudgetTimer);
+        if (!this._interactionBudget) {
+            this._interactionBudget = true;
+            this._applyDrawBudget();
+        }
+    }
+
+    _endInteractionBudgetSoon(delay = INTERACTION_BUDGET_SETTLE_MS) {
+        if (this._interactionBudgetTimer) clearTimeout(this._interactionBudgetTimer);
+        this._interactionBudgetTimer = setTimeout(() => {
+            this._interactionBudget = false;
+            this._applyDrawBudget();
+        }, delay);
+    }
+
+    _markInteractionActive() {
+        this._beginInteractionBudget();
+        this._endInteractionBudgetSoon();
+    }
+
+    _cancelPendingFlush() {
+        if (this._pendingFlushRaf) {
+            cancelAnimationFrame(this._pendingFlushRaf);
+            this._pendingFlushRaf = null;
+        }
+    }
+
     setMessage(text) {
         if (!this.messageEl) return;
         this.messageEl.textContent = text;
@@ -1254,12 +1377,21 @@ class PointCloudViewer {
 
     clearCloud() {
         this.clearMeasurement();
+        this._cancelPendingFlush();
         if (this.pointCloud) {
             this.scene.remove(this.pointCloud);
             this.pointCloud.geometry.dispose();
             this.pointCloud.material.dispose();
             this.pointCloud = null;
         }
+        this._loadedPoints = 0;
+        this._totalPoints = 0;
+        this._updatePerf({
+            livePointClouds: 0,
+            visiblePoints: 0,
+            loadedPoints: 0,
+            totalPoints: 0,
+        });
     }
 
     // --- True streaming load + render ------------------------------------
@@ -1285,97 +1417,164 @@ class PointCloudViewer {
     async show(key, cfg) {
         if (this.activeKey === key && this.pointCloud) return;
         if (this.activeAbort) this.activeAbort.abort();
+        this._cancelPendingFlush();
         const abort = new AbortController();
         this.activeAbort = abort;
         this.activeKey = key;
+        const loadId = ++this.activeLoadId;
+        this._baseSamplingRate = Math.max(0, Math.min(1, cfg.samplingRate != null ? cfg.samplingRate : 1));
+        this._loadingBudget = true;
+        this._interactionBudget = false;
 
         this.setMessage('Loading…');
+        this._updatePerf({
+            activeScene: key,
+            activeLoadId: loadId,
+            activeUrl: cfg.cloud,
+            loading: true,
+            status: 'loading',
+        });
 
-        // Per-scene state captured in closure so a later `show` call
-        // can't race-write the earlier scene's buffers.
-        let positions = null;
-        let colors = null;
-        let xform = null;           // {cx, cy, cz, flipY, radius}
-        let writeOffset = 0;        // next unfilled point slot
-        let flushedUpTo = 0;        // slots already committed to GPU
-        let flushScheduled = false;
-        let firstBlockRendered = false;
-        const geomRef = { current: null };   // the geometry we're filling
+        const isStale = () => abort.signal.aborted || this.activeKey !== key || this.activeLoadId !== loadId;
 
-        const scheduleFlush = () => {
-            if (flushScheduled || abort.signal.aborted) return;
-            flushScheduled = true;
-            requestAnimationFrame(() => {
-                flushScheduled = false;
-                if (abort.signal.aborted || this.activeKey !== key) return;
-                const geo = geomRef.current;
-                if (!geo) return;
-                const from = flushedUpTo;
-                const to = writeOffset;
-                if (from >= to) return;
-                // Sub-upload just the newly-filled slice.  updateRange is
-                // in *scalar* units (3 floats per point for position,
-                // 3 bytes per point for colour).
-                const posAttr = geo.getAttribute('position');
-                const colAttr = geo.getAttribute('color');
-                posAttr.updateRange.offset = from * 3;
-                posAttr.updateRange.count  = (to - from) * 3;
-                posAttr.needsUpdate = true;
-                colAttr.updateRange.offset = from * 3;
-                colAttr.updateRange.count  = (to - from) * 3;
-                colAttr.needsUpdate = true;
-                geo.setDrawRange(0, to);
-                flushedUpTo = to;
-            });
-        };
+        const loadIntoViewer = async (url, phase) => {
+            if (isStale()) return false;
+            const isPreview = phase === 'preview';
+            this._loadingBudget = !isPreview;
+            this._updatePerf({ activeUrl: url, status: phase });
 
-        try {
+            // Per-load state captured in closure so a later show() call
+            // cannot race-write this scene's buffers.
+            let positions = null;
+            let colors = null;
+            let xform = null;           // {cx, cy, cz, flipY, radius}
+            let writeOffset = 0;        // next unfilled point slot
+            let flushedUpTo = 0;        // slots already committed to GPU
+            let flushScheduled = false;
+            let firstBlockRendered = false;
+            const geomRef = { current: null };   // the geometry we're filling
+
+            const scheduleFlush = () => {
+                if (flushScheduled || isStale()) return;
+                flushScheduled = true;
+                this._pendingFlushRaf = requestAnimationFrame(() => {
+                    this._pendingFlushRaf = null;
+                    flushScheduled = false;
+                    if (isStale()) return;
+                    const geo = geomRef.current;
+                    if (!geo || geo !== this.pointCloud?.geometry) return;
+                    const from = flushedUpTo;
+                    const to = writeOffset;
+                    if (from >= to) return;
+                    // Sub-upload just the newly-filled slice.  updateRange is
+                    // in *scalar* units (3 floats per point for position,
+                    // 3 bytes per point for colour).
+                    const posAttr = geo.getAttribute('position');
+                    const colAttr = geo.getAttribute('color');
+                    posAttr.updateRange.offset = from * 3;
+                    posAttr.updateRange.count  = (to - from) * 3;
+                    posAttr.needsUpdate = true;
+                    colAttr.updateRange.offset = from * 3;
+                    colAttr.updateRange.count  = (to - from) * 3;
+                    colAttr.needsUpdate = true;
+                    flushedUpTo = to;
+                    this._applyDrawBudget();
+                });
+            };
+
             const onHeader = (header) => {
-                if (abort.signal.aborted) return;
+                if (isStale()) return;
+                this._cancelPendingFlush();
                 positions = new Float32Array(header.count * 3);
                 colors    = new Uint8Array(header.count * 3);
                 xform = computeXformFromHeader(header, cfg);
-                this._totalPoints = header.count;
                 // Install an empty geometry (drawRange=0); blocks fill it.
                 geomRef.current = this._installGeometry(
                     positions, colors, header.count, 0, cfg, xform.radius
                 );
+                this._totalPoints = header.count;
+                this._loadedPoints = 0;
+                this._updatePerf({
+                    totalPoints: header.count,
+                    loadedPoints: 0,
+                    visiblePoints: 0,
+                    livePointClouds: this.pointCloud ? 1 : 0,
+                });
             };
 
-            const onBlock = (header, bytes, byteOffset, blockCount, blockIdx) => {
-                if (abort.signal.aborted) return;
+            const onBlock = (header, bytes, byteOffset, blockCount) => {
+                if (isStale()) return;
                 decodeBlock(bytes, byteOffset, blockCount, positions, colors,
                             writeOffset, header);
                 applyTransform(positions, writeOffset, blockCount, xform);
                 writeOffset += blockCount;
+                this._loadedPoints = writeOffset;
                 if (!firstBlockRendered) {
                     firstBlockRendered = true;
-                    this.setMessage('');
+                    this.setMessage(isPreview ? '' : 'Refining…');
                 }
                 scheduleFlush();
             };
 
             const onProgress = (pct) => {
-                if (abort.signal.aborted || firstBlockRendered) return;
-                this.setMessage(`Loading ${pct}%`);
+                if (isStale() || firstBlockRendered) return;
+                this.setMessage(isPreview ? `Preview ${pct}%` : `Loading ${pct}%`);
             };
 
-            await this.loader.load(cfg.cloud, {
+            await this.loader.load(url, {
                 signal: abort.signal, onHeader, onBlock, onProgress
             });
-            if (abort.signal.aborted || this.activeKey !== key) return;
+            if (isStale()) return false;
 
-            // Commit any residual slots that hadn't flushed yet.
+            // Commit any residual slots that had not flushed yet.
             if (writeOffset > flushedUpTo) scheduleFlush();
+            return true;
+        };
+
+        try {
+            if (cfg.preview && cfg.preview !== cfg.cloud) {
+                const previewOk = await loadIntoViewer(cfg.preview, 'preview');
+                if (!previewOk) return;
+                await new Promise(resolve => requestAnimationFrame(resolve));
+                if (isStale()) return;
+                this.setMessage('Refining…');
+            }
+
+            const fullOk = await loadIntoViewer(cfg.cloud, 'full');
+            if (!fullOk) return;
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            if (isStale()) return;
+
+            this._loadingBudget = false;
+            this._interactionBudget = false;
+            this._applyDrawBudget();
             this.setMessage('');
+            this._updatePerf({
+                loading: false,
+                status: 'ready',
+                completedLoads: window.__UNIT_DEMO_PERF.completedLoads + 1,
+            });
             // Emit a one-shot "ready" event so external controllers (e.g.
             // the settings panel) can sync their UI to the just-loaded
             // scene's values.
             if (this.onSceneReady) this.onSceneReady(key, cfg);
         } catch (err) {
-            if (err.name === 'AbortError' || abort.signal.aborted) return;
+            if (err.name === 'AbortError' || abort.signal.aborted) {
+                this._cancelPendingFlush();
+                this._updatePerf({
+                    abortedLoads: window.__UNIT_DEMO_PERF.abortedLoads + 1,
+                    status: this.activeLoadId === loadId ? 'aborted' : window.__UNIT_DEMO_PERF.status,
+                    loading: this.activeLoadId === loadId ? false : window.__UNIT_DEMO_PERF.loading,
+                });
+                return;
+            }
             console.error('Error loading point cloud:', err);
             this.setMessage('Failed to load point cloud');
+            this._updatePerf({ loading: false, status: 'error' });
+        } finally {
+            if (this.activeLoadId === loadId) {
+                this.activeAbort = null;
+            }
         }
     }
 
@@ -1389,10 +1588,8 @@ class PointCloudViewer {
     }
 
     setSamplingRate(rate) {
-        if (!this.pointCloud || !this._totalPoints) return;
-        const clamped = Math.max(0, Math.min(1, rate));
-        const count = Math.max(1, Math.floor(this._totalPoints * clamped));
-        this.pointCloud.geometry.setDrawRange(0, count);
+        this._baseSamplingRate = Math.max(0, Math.min(1, rate));
+        this._applyDrawBudget();
     }
 
     setBrightness(b) {
@@ -1882,6 +2079,7 @@ class ViewerControls {
             `${this.currentKey}: {`,
             `    title: ${JSON.stringify(cfg.title || this.currentKey)},`,
             `    cloud: ${JSON.stringify(cfg.cloud)},`,
+            cfg.preview ? `    preview: ${JSON.stringify(cfg.preview)},` : null,
             `    pointSize: ${(+cfg.pointSize).toFixed(4)},`,
             `    flipY: ${!!cfg.flipY},`,
             `    camera: { x: ${cam.x.toFixed(3)}, y: ${cam.y.toFixed(3)}, z: ${cam.z.toFixed(3)} },`,
@@ -1890,7 +2088,7 @@ class ViewerControls {
             `    background: ${JSON.stringify(cfg.background || '#ffffff')},`,
             `    rotation: { x: ${+(cfg.rotation?.x || 0)}, y: ${+(cfg.rotation?.y || 0)}, z: ${+(cfg.rotation?.z || 0)} }`,
             `}`
-        ];
+        ].filter(Boolean);
         const text = lines.join('\n');
         navigator.clipboard.writeText(text).then(() => {
             btn.textContent = 'Copied ✓';
