@@ -1525,7 +1525,11 @@ class PointCloudViewer {
         const loadIntoViewer = async (url, phase) => {
             if (isStale()) return false;
             const isPreview = phase === 'preview';
-            this._loadingBudget = !isPreview;
+            // Keep the currently visible preview/LOD on screen while a higher
+            // quality file decodes, then swap once. This avoids the visible
+            // reset from an empty geometry back to a sparse cloud.
+            const deferInstall = quality === 'full' && !isPreview && !!this.pointCloud;
+            this._loadingBudget = !isPreview && !deferInstall;
             this._updatePerf({ activeUrl: url, status: phase });
 
             // Per-load state captured in closure so a later show() call
@@ -1537,6 +1541,7 @@ class PointCloudViewer {
             let flushedUpTo = 0;        // slots already committed to GPU
             let flushScheduled = false;
             let firstBlockRendered = false;
+            let deferredHeader = null;
             const geomRef = { current: null };   // the geometry we're filling
 
             const scheduleFlush = () => {
@@ -1569,11 +1574,19 @@ class PointCloudViewer {
 
             const onHeader = (header) => {
                 if (isStale()) return;
-                const previousView = this._captureViewState();
-                this._cancelPendingFlush();
                 positions = new Float32Array(header.count * 3);
                 colors    = new Uint8Array(header.count * 3);
                 xform = computeXformFromHeader(header, cfg);
+                if (deferInstall) {
+                    deferredHeader = header;
+                    this._updatePerf({
+                        refinementTotalPoints: header.count,
+                        refinementLoadedPoints: 0,
+                    });
+                    return;
+                }
+                const previousView = this._captureViewState();
+                this._cancelPendingFlush();
                 // Install an empty geometry (drawRange=0); blocks fill it.
                 geomRef.current = this._installGeometry(
                     positions, colors, header.count, 0, cfg, xform.radius
@@ -1598,6 +1611,14 @@ class PointCloudViewer {
                             writeOffset, header);
                 applyTransform(positions, writeOffset, blockCount, xform);
                 writeOffset += blockCount;
+                if (deferInstall) {
+                    this._updatePerf({ refinementLoadedPoints: writeOffset });
+                    if (!firstBlockRendered) {
+                        firstBlockRendered = true;
+                        this.setMessage('Refining…');
+                    }
+                    return;
+                }
                 this._loadedPoints = writeOffset;
                 if (!firstBlockRendered) {
                     firstBlockRendered = true;
@@ -1615,6 +1636,28 @@ class PointCloudViewer {
                 signal: abort.signal, onHeader, onBlock, onProgress
             });
             if (isStale()) return false;
+
+            if (deferInstall) {
+                if (!deferredHeader) return false;
+                const previousView = this._captureViewState();
+                this._cancelPendingFlush();
+                geomRef.current = this._installGeometry(
+                    positions, colors, deferredHeader.count, writeOffset, cfg, xform.radius
+                );
+                this.activeUrl = url;
+                this._totalPoints = deferredHeader.count;
+                this._loadedPoints = writeOffset;
+                this._loadingBudget = false;
+                this._interactionBudget = false;
+                this._applyDrawBudget();
+                if (previousView) this._restoreViewState(previousView);
+                this._updatePerf({
+                    refinementTotalPoints: 0,
+                    refinementLoadedPoints: 0,
+                    livePointClouds: this.pointCloud ? 1 : 0,
+                });
+                return true;
+            }
 
             // Commit any residual slots that had not flushed yet.
             if (writeOffset > flushedUpTo) scheduleFlush();
