@@ -925,19 +925,47 @@ class PntsChunkStore {
 class PntsLoader {
     constructor(dbName) {
         this.store = new PntsChunkStore(dbName);
+        this.fullFileCache = new Map();
     }
 
     estimateCacheBytes(maxAgeMs) {
         return this.store.estimateBytes(maxAgeMs);
     }
 
+    releaseFullFile(url) {
+        this.fullFileCache.delete(url);
+    }
+
+    _rememberFullFile(url, bytes) {
+        if (!this.fullFileCache.has(url)) {
+            this.fullFileCache.clear();
+            this.fullFileCache.set(url, bytes);
+        }
+        return this.fullFileCache.get(url);
+    }
+
+    _sliceFullFile(url, start, end) {
+        const full = this.fullFileCache.get(url);
+        if (!full || end >= full.byteLength) return null;
+        return full.slice(start, end + 1);
+    }
+
     async _fetchRange(url, start, end, signal, onBytes) {
+        const cachedFull = this._sliceFullFile(url, start, end);
+        if (cachedFull) return cachedFull;
         if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
         const resp = await fetch(url, {
             signal,
             priority: 'high',
             headers: { Range: `bytes=${start}-${end}` },
         });
+        if (resp.status === 200) {
+            const full = this._rememberFullFile(url, new Uint8Array(await resp.arrayBuffer()));
+            if (onBytes) onBytes(full.byteLength);
+            const slice = this._sliceFullFile(url, start, end);
+            if (slice) return slice;
+            throw new Error(`Full response too small for requested range ${start}-${end}: ${url}`);
+        }
         if (resp.status !== 206) {
             throw new Error(`Range request failed (${resp.status}) for ${url}`);
         }
@@ -1031,6 +1059,16 @@ class PntsLoader {
             state.cachedBytes += cached.byteLength;
             return { bytes: cached, fromCache: true };
         }
+        const cachedFull = this._sliceFullFile(
+            state.url,
+            chunk.offset,
+            chunk.offset + chunk.compressedSize - 1
+        );
+        if (cachedFull) {
+            state.cachedBytes += cachedFull.byteLength;
+            await this.store.put(state.url, index, cachedFull);
+            return { bytes: cachedFull, fromCache: true };
+        }
 
         const partial = state.partialChunks.get(index) || { parts: [], length: 0 };
         let parts = partial.parts.slice();
@@ -1050,6 +1088,16 @@ class PntsLoader {
             priority: 'high',
             headers: { Range: `bytes=${start}-${end}` },
         });
+        if (resp.status === 200) {
+            const full = this._rememberFullFile(state.url, new Uint8Array(await resp.arrayBuffer()));
+            state.networkBytes += full.byteLength;
+            if (onBytes) onBytes(full.byteLength);
+            const bytes = this._sliceFullFile(state.url, chunk.offset, chunk.offset + chunk.compressedSize - 1);
+            if (!bytes) throw new Error(`Full response too small for chunk ${index}: ${state.url}`);
+            state.partialChunks.delete(index);
+            await this.store.put(state.url, index, bytes);
+            return { bytes, fromCache: false };
+        }
         if (resp.status !== 206) throw new Error(`Chunk range failed (${resp.status}) for ${state.url}`);
         if (!resp.body) {
             const bytes = new Uint8Array(await resp.arrayBuffer());
@@ -2075,6 +2123,7 @@ class PointCloudViewer {
             this.activeQuality = 'full';
             this.setMessage('');
             this._commitStateProgress(state);
+            this.loader.releaseFullFile?.(state.url);
             this._updatePerf({
                 loading: false,
                 status: 'ready',
