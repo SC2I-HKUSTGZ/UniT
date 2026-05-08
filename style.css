@@ -192,7 +192,7 @@ sup {
 }
 
 /* Section blocks */
-.abstract, .citation, .visualization-container, .method, .results, .capabilities, .acknowledgements {
+.abstract, .citation, .visualization-container, .method, .results, .capabilities, .demo-container, .acknowledgements {
     background-color: #f8f9fa;
     padding: 30px;
     border-radius: 18px;
@@ -201,7 +201,7 @@ sup {
     transition: padding-bottom 0.1s ease-in-out;
 }
 
-.abstract h2, .citation h2, .visualization-container h2, .method h2, .results h2, .capabilities h2, .acknowledgements h2 {
+.abstract h2, .citation h2, .visualization-container h2, .method h2, .results h2, .capabilities h2, .demo-container h2, .acknowledgements h2 {
     margin-top: 0;
     text-align: left;
     font-size: 1.5em;
@@ -1055,12 +1055,10 @@ sup {
 
 /* Hugging Face Demo */
 .demo-container {
-    padding: 20px 0;
-    margin-bottom: 40px;
+    margin-bottom: 30px;
 }
 
 .demo-container h2 {
-    text-align: center;
     margin-bottom: 10px;
 }
 
@@ -1076,7 +1074,8 @@ sup {
     width: 100%;
     border-radius: 16px;
     overflow: hidden;
-    background: #f8f9fa;
+    background: #fff;
+    border: 1px solid #e8eaed;
 }
 
 .hf-space-wrapper iframe {
@@ -1185,7 +1184,7 @@ footer {
     .affiliations { font-size: 0.7em; }
     .links a { padding: 8px 15px; margin: 5px; }
     
-    .abstract, .citation, .visualization-container, .method, .results, .capabilities, .acknowledgements {
+    .abstract, .citation, .visualization-container, .method, .results, .capabilities, .demo-container, .acknowledgements {
         padding: 18px;
         border-radius: 14px;
     }
@@ -1194,7 +1193,7 @@ footer {
     .video-container video { border-radius: 14px 14px 0 0; }
     .video-placeholder { border-radius: 12px; }
     
-    .abstract h2, .citation h2, .visualization-container h2, .method h2, .results h2, .capabilities h2, .acknowledgements h2 {
+    .abstract h2, .citation h2, .visualization-container h2, .method h2, .results h2, .capabilities h2, .demo-container h2, .acknowledgements h2 {
         font-size: 1.3em;
     }
     
