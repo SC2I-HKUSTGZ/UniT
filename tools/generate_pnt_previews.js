@@ -6,7 +6,10 @@ const zlib = require('zlib');
 
 const ROOT = path.resolve(__dirname, '..');
 const DEMO_DIR = path.join(ROOT, 'assets', 'demos');
-const TARGET_POINTS = 393216; // 24 blocks when blockSize is 16384.
+const LEVELS = [
+    ['preview.pnt.gz', 393216],  // 24 blocks when blockSize is 16384.
+    ['lod-1.pnt.gz', 1572864],   // 96 blocks: dense enough to refine before full.
+];
 
 function parseHeader(buf) {
     return {
@@ -25,9 +28,28 @@ function patchHeader(buf, count, numBlocks) {
     return out;
 }
 
+function writeLevel(decoded, header, sceneDir, fileName, targetPoints) {
+    const output = path.join(sceneDir, fileName);
+    const blocks = Math.max(1, Math.min(
+        header.numBlocks,
+        Math.floor(targetPoints / header.blockSize)
+    ));
+    const count = Math.min(header.count, blocks * header.blockSize);
+    const bytes = 44 + count * 9;
+    const patchedHeader = patchHeader(decoded, count, blocks);
+    const payload = decoded.subarray(44, bytes);
+    const level = Buffer.concat([patchedHeader, payload]);
+    fs.writeFileSync(output, zlib.gzipSync(level, { level: 9 }));
+    return {
+        file: fileName,
+        points: count,
+        blocks,
+        mb: +(fs.statSync(output).size / 1048576).toFixed(2),
+    };
+}
+
 function generatePreview(sceneDir) {
     const input = path.join(sceneDir, 'scene.pnt.gz');
-    const output = path.join(sceneDir, 'preview.pnt.gz');
     if (!fs.existsSync(input)) return null;
 
     const decoded = zlib.gunzipSync(fs.readFileSync(input));
@@ -36,22 +58,11 @@ function generatePreview(sceneDir) {
         throw new Error(`${input} is not a UNP4 file`);
     }
 
-    const previewBlocks = Math.max(1, Math.min(
-        header.numBlocks,
-        Math.floor(TARGET_POINTS / header.blockSize)
-    ));
-    const previewCount = Math.min(header.count, previewBlocks * header.blockSize);
-    const previewBytes = 44 + previewCount * 9;
-    const patchedHeader = patchHeader(decoded, previewCount, previewBlocks);
-    const payload = decoded.subarray(44, previewBytes);
-    const preview = Buffer.concat([patchedHeader, payload]);
-    fs.writeFileSync(output, zlib.gzipSync(preview, { level: 9 }));
-
     return {
         scene: path.basename(sceneDir),
-        points: previewCount,
-        blocks: previewBlocks,
-        mb: +(fs.statSync(output).size / 1048576).toFixed(2),
+        levels: LEVELS.map(([fileName, targetPoints]) =>
+            writeLevel(decoded, header, sceneDir, fileName, targetPoints)
+        ),
     };
 }
 
