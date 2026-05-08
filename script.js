@@ -536,7 +536,11 @@ async function initDemo() {
         if (!cfg) return;
         if (key === currentDemo) {
             const selectedVideo = document.querySelector(`.demo-thumb[data-demo="${key}"] video`);
-            if (selectedVideo) focusThumbVideo(selectedVideo);
+            if (selectedVideo && selectedVideo !== activeThumbVideo) {
+                focusThumbVideo(selectedVideo);
+            } else if (selectedVideo) {
+                maintainActiveThumbLoop(selectedVideo);
+            }
             const resolved = controls.bind(key, cfg);
             if (full) viewer.showFull(key, resolved);
             else viewer.showPreview(key, resolved);
@@ -1923,6 +1927,9 @@ class PointCloudViewer {
         }
         this._detachCurrentState(key);
         const state = this._getState(key, cfg);
+        const alreadyAttached = this.currentState === state
+            && this.pointCloud === state.pointCloud
+            && !!state.pointCloud;
         state.lastActive = Date.now();
 
         this.currentState = state;
@@ -1932,6 +1939,14 @@ class PointCloudViewer {
         this._baseSamplingRate = Math.max(0, Math.min(1, cfg.samplingRate != null ? cfg.samplingRate : 1));
         this._loadingBudget = false;
         this._interactionBudget = false;
+
+        if (alreadyAttached) {
+            this._startOrResumeState(state);
+            this._refreshResourceCounters({
+                effectiveConfig: this._effectiveConfigSummary(cfg),
+            });
+            return;
+        }
 
         if (!state.pointCloud && state.manifest && state.positions && state.colors) {
             this._ensureStateGeometry(state);
