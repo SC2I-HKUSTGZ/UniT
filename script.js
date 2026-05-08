@@ -130,32 +130,51 @@ function initNavigation() {
 // ========================================
 // Deferred Examples bootstrap
 //
-// The point-cloud viewer is the only heavyweight part of the page: it
-// creates a WebGL renderer, downloads/decompresses a 55 MB default scene,
-// allocates large typed arrays, and renders while active. Keep all of that
-// behind explicit user intent so opening the project page or jumping past
-// Examples to Results cannot saturate the GPU.
+// The point-cloud viewer is the only heavyweight part of the page.  It
+// now has two entry points: viewport exposure may load only the tiny root
+// preview, while direct interaction with the canvas or thumbnails starts
+// the full progressive refinement path.
 // ========================================
 function initDeferredDemo() {
     const demo = document.getElementById('demo');
     if (!demo) return;
 
-    let started = false;
-    const start = () => {
-        if (started) return;
-        started = true;
-        initDemo().catch(err => {
-            console.error('Failed to initialize demo:', err);
-            started = false;
-        });
+    let demoPromise = null;
+    const getDemo = () => {
+        if (!demoPromise) {
+            demoPromise = initDemo().catch(err => {
+                console.error('Failed to initialize demo:', err);
+                demoPromise = null;
+                throw err;
+            });
+        }
+        return demoPromise;
+    };
+
+    const startPreview = () => {
+        getDemo().then(controller => controller.showPreview()).catch(() => {});
+    };
+
+    const startFull = (key) => {
+        getDemo().then(controller => controller.showFull(key)).catch(() => {});
     };
 
     const demoButton = document.querySelector('.chapters button[data-section="demo"]');
     if (demoButton) {
-        demoButton.addEventListener('click', () => requestAnimationFrame(start), { once: true });
+        demoButton.addEventListener('click', () => requestAnimationFrame(startPreview), { once: true });
     }
 
-    demo.addEventListener('click', start, { once: true });
+    if ('IntersectionObserver' in window) {
+        const io = new IntersectionObserver((entries) => {
+            if (entries.some(e => e.isIntersecting)) startPreview();
+        }, { rootMargin: '160px 0px', threshold: 0.01 });
+        io.observe(demo);
+    }
+
+    demo.addEventListener('click', (e) => {
+        if (e.target.closest?.('.demo-thumb')) return;
+        startFull();
+    });
 }
 
 // ========================================
@@ -261,6 +280,7 @@ const DEMO_CONFIGS = {
         title: 'HKUST (GZ) INTR',
         cloud: 'assets/demos/hkust_intr/scene.pnt.gz',
         preview: 'assets/demos/hkust_intr/preview.pnt.gz',
+        lods: ['assets/demos/hkust_intr/preview.pnt.gz', 'assets/demos/hkust_intr/lod-1.pnt.gz'],
         pointSize: 0.012007,
         flipY: true,
         camera: { x: -0.489, y: 0.244, z: -1.140 },
@@ -273,6 +293,7 @@ const DEMO_CONFIGS = {
         title: 'HKUST (GZ) Toy',
         cloud: 'assets/demos/hkust_toy/scene.pnt.gz',
         preview: 'assets/demos/hkust_toy/preview.pnt.gz',
+        lods: ['assets/demos/hkust_toy/preview.pnt.gz', 'assets/demos/hkust_toy/lod-1.pnt.gz'],
         pointSize: 0.000001,
         flipY: true,
         camera: { x: -0.400, y: 0.200, z: -1.500 },
@@ -285,6 +306,7 @@ const DEMO_CONFIGS = {
         title: 'HKUST (GZ) Red Bird',
         cloud: 'assets/demos/hkust_redbird/scene.pnt.gz',
         preview: 'assets/demos/hkust_redbird/preview.pnt.gz',
+        lods: ['assets/demos/hkust_redbird/preview.pnt.gz', 'assets/demos/hkust_redbird/lod-1.pnt.gz'],
         pointSize: 0.0000,
         flipY: true,
         camera: { x: -0.349, y: 0.244, z: -1.117 },
@@ -297,6 +319,7 @@ const DEMO_CONFIGS = {
         title: 'Drift',
         cloud: 'assets/demos/drift/scene.pnt.gz',
         preview: 'assets/demos/drift/preview.pnt.gz',
+        lods: ['assets/demos/drift/preview.pnt.gz'],
         pointSize: 0.000001,
         flipY: true,
         camera: { x: -0.250, y: 0.250, z: -0.750 },
@@ -309,6 +332,7 @@ const DEMO_CONFIGS = {
         title: 'GTA SfM',
         cloud: 'assets/demos/gta_sfm/scene.pnt.gz',
         preview: 'assets/demos/gta_sfm/preview.pnt.gz',
+        lods: ['assets/demos/gta_sfm/preview.pnt.gz', 'assets/demos/gta_sfm/lod-1.pnt.gz'],
         pointSize: 0.000001,
         flipY: true,
         camera: { x: -0.361, y: 0.180, z: -1.263 },
@@ -321,6 +345,7 @@ const DEMO_CONFIGS = {
         title: 'KITTI',
         cloud: 'assets/demos/kitti/scene.pnt.gz',
         preview: 'assets/demos/kitti/preview.pnt.gz',
+        lods: ['assets/demos/kitti/preview.pnt.gz', 'assets/demos/kitti/lod-1.pnt.gz'],
         pointSize: 0.103814,
         flipY: true,
         camera: { x: -0.308, y: 0.451, z: -1.025 },
@@ -338,7 +363,7 @@ const CONTROLS_STORAGE_KEY = 'unit-demo-controls-v2';
 const CACHE_NAME = 'unit-pnt-v11';
 
 const LOAD_POINT_BUDGET_FACTOR = 0.65;
-const INTERACTION_POINT_BUDGET_FACTOR = 0.45;
+const INTERACTION_POINT_BUDGET_FACTOR = 1.0;
 const INTERACTION_BUDGET_SETTLE_MS = 450;
 const PNT_COMPACT_THRESHOLD = 1 << 20;
 
@@ -488,12 +513,15 @@ async function initDemo() {
         }
     });
 
-    function select(key) {
+    function select(key, full = true) {
         const cfg = DEMO_CONFIGS[key];
         if (!cfg) return;
         if (key === currentDemo) {
             const selectedVideo = document.querySelector(`.demo-thumb[data-demo="${key}"] video`);
             if (selectedVideo) focusThumbVideo(selectedVideo);
+            const resolved = controls.bind(key, cfg);
+            if (full) viewer.showFull(key, resolved);
+            else viewer.showPreview(key, resolved);
             return;
         }
         currentDemo = key;
@@ -508,8 +536,18 @@ async function initDemo() {
         });
         if (selectedVideo) focusThumbVideo(selectedVideo);
         const resolved = controls.bind(key, cfg);
-        viewer.show(key, resolved);
+        if (full) viewer.showFull(key, resolved);
+        else viewer.showPreview(key, resolved);
     }
+
+    const requestFullForCurrent = () => {
+        if (!currentDemo) return;
+        select(currentDemo, true);
+    };
+    canvas.addEventListener('pointerdown', requestFullForCurrent, { capture: true });
+    canvas.addEventListener('wheel', requestFullForCurrent, { capture: true, passive: true });
+    const measureBtn = document.getElementById('measure-btn');
+    if (measureBtn) measureBtn.addEventListener('click', requestFullForCurrent, { capture: true });
 
     // Start (or resume) autoplay on the currently-focused thumbnail.
     // Three independent things can defer playback here:
@@ -651,10 +689,23 @@ async function initDemo() {
                 if (v === activeThumbVideo) rewindIfAtEnd(v);
             });
         }
-        t.addEventListener('click', () => select(t.dataset.demo));
+        t.addEventListener('click', (e) => {
+            e.stopPropagation();
+            select(t.dataset.demo, true);
+        });
     });
 
-    select('hkust_intr');
+    return {
+        showPreview(key = currentDemo || 'hkust_intr') {
+            select(key, false);
+        },
+        showFull(key = currentDemo || 'hkust_intr') {
+            select(key, true);
+        },
+        get currentDemo() {
+            return currentDemo;
+        }
+    };
 }
 
 
@@ -964,6 +1015,8 @@ class PointCloudViewer {
         this.loader = loader;
         this.pointCloud = null;
         this.activeKey = null;
+        this.activeQuality = 'idle';
+        this.activeUrl = null;
         this.activeAbort = null;
         this.activeLoadId = 0;
         this._pendingFlushRaf = null;
@@ -1414,25 +1467,37 @@ class PointCloudViewer {
     // arrive.  Mid-load cancellation via `AbortController` leaves the
     // partially-rendered scene displayed until the next `show` call.
     // ---------------------------------------------------------------------
-    async show(key, cfg) {
-        if (this.activeKey === key && this.pointCloud) return;
+    showPreview(key, cfg) {
+        if (this.activeKey === key && this.pointCloud && this.activeQuality !== 'idle') return Promise.resolve();
+        return this._show(key, cfg, 'preview');
+    }
+
+    showFull(key, cfg) {
+        if (this.activeKey === key && this.pointCloud && this.activeQuality === 'full' && !this.activeAbort) {
+            return Promise.resolve();
+        }
+        return this._show(key, cfg, 'full');
+    }
+
+    async _show(key, cfg, quality) {
         if (this.activeAbort) this.activeAbort.abort();
         this._cancelPendingFlush();
         const abort = new AbortController();
         this.activeAbort = abort;
         this.activeKey = key;
+        this.activeQuality = quality === 'full' ? 'loading-full' : 'loading-preview';
         const loadId = ++this.activeLoadId;
         this._baseSamplingRate = Math.max(0, Math.min(1, cfg.samplingRate != null ? cfg.samplingRate : 1));
-        this._loadingBudget = true;
+        this._loadingBudget = quality === 'full';
         this._interactionBudget = false;
 
-        this.setMessage('Loading…');
+        this.setMessage(quality === 'full' ? 'Loading…' : 'Loading preview…');
         this._updatePerf({
             activeScene: key,
             activeLoadId: loadId,
-            activeUrl: cfg.cloud,
+            activeUrl: quality === 'full' ? cfg.cloud : (cfg.preview || cfg.cloud),
             loading: true,
-            status: 'loading',
+            status: quality === 'full' ? 'loading' : 'preview-loading',
         });
 
         const isStale = () => abort.signal.aborted || this.activeKey !== key || this.activeLoadId !== loadId;
@@ -1492,6 +1557,7 @@ class PointCloudViewer {
                 geomRef.current = this._installGeometry(
                     positions, colors, header.count, 0, cfg, xform.radius
                 );
+                this.activeUrl = url;
                 this._totalPoints = header.count;
                 this._loadedPoints = 0;
                 this._updatePerf({
@@ -1532,9 +1598,32 @@ class PointCloudViewer {
         };
 
         try {
-            if (cfg.preview && cfg.preview !== cfg.cloud) {
-                const previewOk = await loadIntoViewer(cfg.preview, 'preview');
+            if (quality === 'preview') {
+                const previewUrl = cfg.preview || cfg.lods?.[0] || cfg.cloud;
+                const previewOk = await loadIntoViewer(previewUrl, 'preview');
                 if (!previewOk) return;
+                await new Promise(resolve => requestAnimationFrame(resolve));
+                if (isStale()) return;
+                this._loadingBudget = false;
+                this._interactionBudget = false;
+                this._applyDrawBudget();
+                this.setMessage('');
+                this.activeQuality = 'preview';
+                this._updatePerf({
+                    loading: false,
+                    status: 'preview-ready',
+                    completedLoads: window.__UNIT_DEMO_PERF.completedLoads + 1,
+                });
+                return;
+            }
+
+            const lods = Array.isArray(cfg.lods) && cfg.lods.length
+                ? cfg.lods
+                : (cfg.preview && cfg.preview !== cfg.cloud ? [cfg.preview] : []);
+            for (const [i, lodUrl] of lods.entries()) {
+                if (lodUrl === this.activeUrl && this.activeKey === key && this.pointCloud) continue;
+                const lodOk = await loadIntoViewer(lodUrl, i === 0 ? 'preview' : `lod-${i}`);
+                if (!lodOk) return;
                 await new Promise(resolve => requestAnimationFrame(resolve));
                 if (isStale()) return;
                 this.setMessage('Refining…');
@@ -1549,6 +1638,7 @@ class PointCloudViewer {
             this._interactionBudget = false;
             this._applyDrawBudget();
             this.setMessage('');
+            this.activeQuality = 'full';
             this._updatePerf({
                 loading: false,
                 status: 'ready',
