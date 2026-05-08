@@ -354,14 +354,17 @@ const DEMO_CONFIGS = {
 // sparse/dense display races after the streaming migration.
 const CONTROLS_STORAGE_KEY = 'unit-demo-controls-v3';
 
-const CACHE_NAME = 'unit-pnt-v12';
-const PNTS_DB_NAME = 'unit-pnts-v12';
+const CACHE_NAME = 'unit-pnt-v13';
+const PNTS_DB_NAME = 'unit-pnts-v13';
 
 const FIRST_PAINT_VISIBLE_POINTS = 786_432;
-const CHUNK_FETCH_WINDOW = 2;
+const CHUNK_FETCH_WINDOW = 4;
 const INTERACTION_POINT_BUDGET_FACTOR = 1.0;
 const INTERACTION_BUDGET_SETTLE_MS = 450;
 const PNTS_HEADER_PROBE_BYTES = 8192;
+const CONFIG_ACTIVATION_TIMEOUT_MS = 800;
+const MAX_INDEXEDDB_CACHE_BYTES = 250 * 1024 * 1024;
+const MAX_INACTIVE_DECODED_BYTES = 120 * 1024 * 1024;
 
 window.__UNIT_DEMO_PERF = window.__UNIT_DEMO_PERF || {
     activeScene: null,
@@ -379,8 +382,18 @@ window.__UNIT_DEMO_PERF = window.__UNIT_DEMO_PERF || {
     totalChunkCount: 0,
     networkBytes: 0,
     cachedBytes: 0,
+    cacheBytes: 0,
+    decodedBytes: 0,
+    gpuBytes: 0,
     partialResumeBytes: 0,
     redownloadedChunks: 0,
+    inflightFetches: 0,
+    decodeQueueLength: 0,
+    uploadQueueLength: 0,
+    dirtyUploadRanges: 0,
+    webglContextLost: false,
+    lastError: null,
+    effectiveConfig: null,
     status: 'idle'
 };
 
@@ -499,25 +512,24 @@ async function initDemo() {
     let activeThumbVideo = null;
     let activeThumbToken = 0;
     let activeThumbLoopTimer = null;
+    let configSettled = false;
+    let firstConfigGate = null;
 
-    // When the remote config finally arrives, re-bind the currently-viewed
-    // scene if it was patched.  Other scenes pick up the live values on
-    // their next select() — no need to rerun the render pipeline.
-    configPromise.then((patchedKeys) => {
-        if (!patchedKeys || !patchedKeys.length) return;
-        if (currentDemo && patchedKeys.includes(currentDemo)) {
-            if ((viewer.currentState?.visiblePoints || 0) > 0) return;
-            const cfg = DEMO_CONFIGS[currentDemo];
-            const resolved = controls.bind(currentDemo, cfg);
-            if (viewer.currentState) viewer.currentState.cfg = resolved;
-            // Update live viewer state without re-loading the cloud.
-            viewer.setPointSize(resolved.pointSize);
-            if (resolved.brightness   != null) viewer.setBrightness(resolved.brightness);
-            if (resolved.background)           viewer.setBackground(resolved.background);
-            if (resolved.rotation)             viewer.setRotation(resolved.rotation);
-            if (resolved.camera)               viewer.setCameraOffset(resolved.camera);
+    // Let late remote config patch DEMO_CONFIGS for future activations only.
+    // Mutating the active scene mid-stream can look like a viewer reset, even
+    // when the values are manually tuned and otherwise correct.
+    configPromise.finally(() => { configSettled = true; }).catch(() => {});
+
+    const waitForFirstConfig = () => {
+        if (currentDemo || configSettled) return Promise.resolve();
+        if (!firstConfigGate) {
+            firstConfigGate = Promise.race([
+                configPromise.catch(() => {}),
+                new Promise(resolve => setTimeout(resolve, CONFIG_ACTIVATION_TIMEOUT_MS)),
+            ]);
         }
-    });
+        return firstConfigGate;
+    };
 
     function select(key, full = true) {
         const cfg = DEMO_CONFIGS[key];
@@ -697,16 +709,16 @@ async function initDemo() {
         }
         t.addEventListener('click', (e) => {
             e.stopPropagation();
-            select(t.dataset.demo, true);
+            waitForFirstConfig().then(() => select(t.dataset.demo, true));
         });
     });
 
     return {
         showPreview(key = currentDemo || 'hkust_intr') {
-            select(key, false);
+            return waitForFirstConfig().then(() => select(key, false));
         },
         showFull(key = currentDemo || 'hkust_intr') {
-            select(key, true);
+            return waitForFirstConfig().then(() => select(key, true));
         },
         get currentDemo() {
             return currentDemo;
@@ -739,11 +751,18 @@ function concatUint8(parts, totalLength) {
     return out;
 }
 
+function nextFrame() {
+    return new Promise(resolve => requestAnimationFrame(resolve));
+}
+
 class PntsChunkStore {
     constructor(dbName) {
         this.dbName = dbName;
         this.dbPromise = null;
         this.disabled = !('indexedDB' in window);
+        this.estimatedBytes = 0;
+        this.lastEstimateAt = 0;
+        this.lastEvictAt = 0;
     }
 
     _key(url, index) {
@@ -759,6 +778,9 @@ class PntsChunkStore {
                 const db = req.result;
                 if (!db.objectStoreNames.contains('chunks')) {
                     db.createObjectStore('chunks', { keyPath: 'key' });
+                }
+                if (!db.objectStoreNames.contains('meta')) {
+                    db.createObjectStore('meta', { keyPath: 'key' });
                 }
             };
             req.onsuccess = () => resolve(req.result);
@@ -779,24 +801,27 @@ class PntsChunkStore {
             req.onsuccess = () => {
                 const row = req.result;
                 const bytes = row?.bytes;
-                if (bytes && bytes.byteLength === expectedSize) resolve(bytes);
-                else resolve(null);
+                if (bytes && bytes.byteLength === expectedSize) {
+                    this.touch(url, index, expectedSize).catch(() => {});
+                    resolve(bytes);
+                } else {
+                    resolve(null);
+                }
             };
             req.onerror = () => resolve(null);
         });
     }
 
-    async put(url, index, bytes) {
+    async touch(url, index, size) {
         const db = await this._db();
-        if (!db) return false;
+        if (!db || !db.objectStoreNames.contains('meta')) return false;
         return new Promise(resolve => {
-            const tx = db.transaction('chunks', 'readwrite');
-            tx.objectStore('chunks').put({
+            const tx = db.transaction('meta', 'readwrite');
+            tx.objectStore('meta').put({
                 key: this._key(url, index),
                 url,
                 index,
-                size: bytes.byteLength,
-                bytes,
+                size,
                 updatedAt: Date.now(),
             });
             tx.oncomplete = () => resolve(true);
@@ -804,11 +829,106 @@ class PntsChunkStore {
             tx.onabort = () => resolve(false);
         });
     }
+
+    async put(url, index, bytes) {
+        const db = await this._db();
+        if (!db) return false;
+        const ok = await new Promise(resolve => {
+            const key = this._key(url, index);
+            const tx = db.transaction(['chunks', 'meta'], 'readwrite');
+            tx.objectStore('chunks').put({
+                key,
+                url,
+                index,
+                size: bytes.byteLength,
+                bytes,
+                updatedAt: Date.now(),
+            });
+            tx.objectStore('meta').put({
+                key,
+                url,
+                index,
+                size: bytes.byteLength,
+                updatedAt: Date.now(),
+            });
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => resolve(false);
+            tx.onabort = () => resolve(false);
+        });
+        if (ok) {
+            this.estimatedBytes += bytes.byteLength;
+            this.lastEstimateAt = Date.now();
+            const now = Date.now();
+            if (now - this.lastEvictAt > 3000) {
+                this.lastEvictAt = now;
+                this.evictLRU(MAX_INDEXEDDB_CACHE_BYTES).catch(() => {});
+            }
+        }
+        return ok;
+    }
+
+    async estimateBytes(maxAgeMs = 5000) {
+        const now = Date.now();
+        if (now - this.lastEstimateAt < maxAgeMs) return this.estimatedBytes;
+        const db = await this._db();
+        if (!db) return 0;
+        return new Promise(resolve => {
+            const tx = db.transaction('meta', 'readonly');
+            const req = tx.objectStore('meta').getAll();
+            req.onsuccess = () => {
+                const rows = req.result || [];
+                this.estimatedBytes = rows.reduce((sum, row) => sum + (row.size || 0), 0);
+                this.lastEstimateAt = now;
+                resolve(this.estimatedBytes);
+            };
+            req.onerror = () => resolve(this.estimatedBytes || 0);
+        });
+    }
+
+    async evictLRU(maxBytes) {
+        const db = await this._db();
+        if (!db) return 0;
+        const rows = await new Promise(resolve => {
+            const tx = db.transaction('meta', 'readonly');
+            const req = tx.objectStore('meta').getAll();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => resolve([]);
+        });
+        let total = rows.reduce((sum, row) => sum + (row.size || 0), 0);
+        this.estimatedBytes = total;
+        this.lastEstimateAt = Date.now();
+        if (total <= maxBytes) return total;
+
+        const victims = rows
+            .slice()
+            .sort((a, b) => (a.updatedAt || 0) - (b.updatedAt || 0));
+        await new Promise(resolve => {
+            const tx = db.transaction(['chunks', 'meta'], 'readwrite');
+            const chunks = tx.objectStore('chunks');
+            const meta = tx.objectStore('meta');
+            for (const row of victims) {
+                if (total <= maxBytes) break;
+                total -= row.size || 0;
+                chunks.delete(row.key);
+                meta.delete(row.key);
+            }
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => resolve();
+            tx.onabort = () => resolve();
+        });
+        this.estimatedBytes = Math.max(0, total);
+        this.lastEstimateAt = Date.now();
+        return this.estimatedBytes;
+    }
 }
 
 class PntsLoader {
     constructor(dbName) {
         this.store = new PntsChunkStore(dbName);
+    }
+
+    estimateCacheBytes(maxAgeMs) {
+        return this.store.estimateBytes(maxAgeMs);
     }
 
     async _fetchRange(url, start, end, signal, onBytes) {
@@ -931,22 +1051,30 @@ class PntsLoader {
             headers: { Range: `bytes=${start}-${end}` },
         });
         if (resp.status !== 206) throw new Error(`Chunk range failed (${resp.status}) for ${state.url}`);
-        const reader = resp.body.getReader();
-        const abortReader = () => reader.cancel().catch(() => {});
-        if (signal) signal.addEventListener('abort', abortReader, { once: true });
-        try {
-            while (length < chunk.compressedSize) {
-                if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-                const { done, value } = await reader.read();
-                if (done) break;
-                parts.push(value);
-                length += value.byteLength;
-                state.networkBytes += value.byteLength;
-                state.partialChunks.set(index, { parts, length });
-                if (onBytes) onBytes(value.byteLength);
+        if (!resp.body) {
+            const bytes = new Uint8Array(await resp.arrayBuffer());
+            parts.push(bytes);
+            length += bytes.byteLength;
+            state.networkBytes += bytes.byteLength;
+            if (onBytes) onBytes(bytes.byteLength);
+        } else {
+            const reader = resp.body.getReader();
+            const abortReader = () => reader.cancel().catch(() => {});
+            if (signal) signal.addEventListener('abort', abortReader, { once: true });
+            try {
+                while (length < chunk.compressedSize) {
+                    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    parts.push(value);
+                    length += value.byteLength;
+                    state.networkBytes += value.byteLength;
+                    state.partialChunks.set(index, { parts, length });
+                    if (onBytes) onBytes(value.byteLength);
+                }
+            } finally {
+                if (signal) signal.removeEventListener('abort', abortReader);
             }
-        } finally {
-            if (signal) signal.removeEventListener('abort', abortReader);
         }
 
         if (length !== chunk.compressedSize) {
@@ -1106,6 +1234,7 @@ class PointCloudViewer {
         this._interactionBudget = false;
         this._baseSamplingRate = 1;
         this._loadedPoints = 0;
+        this._contextLost = false;
 
         // Measurement state
         this.measureMode = false;
@@ -1167,6 +1296,46 @@ class PointCloudViewer {
 
         this._installRotateDrag();
         this._installRenderVisibilityGate();
+        this._installContextHandlers();
+    }
+
+    _installContextHandlers() {
+        this.canvas.addEventListener('webglcontextlost', (event) => {
+            event.preventDefault();
+            this._contextLost = true;
+            this._cancelPendingFlush();
+            this._abortAllStreams();
+            if (this._rafId) {
+                cancelAnimationFrame(this._rafId);
+                this._rafId = null;
+            }
+            this.setMessage('WebGL context lost. Reload the page or reselect a scene to recover.');
+            this._updatePerf({
+                webglContextLost: true,
+                loading: false,
+                status: 'webgl-context-lost',
+                lastError: 'WebGL context lost',
+            });
+        }, false);
+
+        this.canvas.addEventListener('webglcontextrestored', () => {
+            this._contextLost = false;
+            for (const state of this.sceneStates.values()) {
+                state.pointCloud = null;
+                state.geometry = null;
+                state.uploadRaf = null;
+                state.uploadDirtyStart = Infinity;
+                state.uploadDirtyEnd = -Infinity;
+            }
+            this.pointCloud = null;
+            this.setMessage('WebGL context restored. Reselect the scene to continue.');
+            this._updatePerf({
+                webglContextLost: false,
+                status: 'webgl-context-restored',
+                livePointClouds: 0,
+            });
+            this._syncRenderLoop();
+        }, false);
     }
 
     // Custom drag-to-rotate: left-button drag over the canvas rotates
@@ -1450,6 +1619,47 @@ class PointCloudViewer {
         Object.assign(window.__UNIT_DEMO_PERF, partial);
     }
 
+    _effectiveConfigSummary(cfg) {
+        if (!cfg) return null;
+        return {
+            pointSize: cfg.pointSize,
+            samplingRate: cfg.samplingRate,
+            brightness: cfg.brightness,
+            background: cfg.background,
+            camera: cfg.camera ? { ...cfg.camera } : null,
+            rotation: cfg.rotation ? { ...cfg.rotation } : null,
+        };
+    }
+
+    _decodedBytesForState(state) {
+        if (!state?.positions || !state?.colors) return 0;
+        return state.positions.byteLength + state.colors.byteLength;
+    }
+
+    _refreshResourceCounters(extra = {}) {
+        let decodedBytes = 0;
+        let gpuBytes = 0;
+        let livePointClouds = 0;
+        for (const state of this.sceneStates.values()) {
+            decodedBytes += this._decodedBytesForState(state);
+            if (state.pointCloud) {
+                gpuBytes += this._decodedBytesForState(state);
+                if (state.pointCloud.parent === this.scene) livePointClouds += 1;
+            }
+        }
+        this._updatePerf({
+            decodedBytes,
+            gpuBytes,
+            livePointClouds,
+            ...extra,
+        });
+        if (this.loader?.estimateCacheBytes) {
+            this.loader.estimateCacheBytes().then(cacheBytes => {
+                this._updatePerf({ cacheBytes });
+            }).catch(() => {});
+        }
+    }
+
     _visiblePointCap() {
         const total = this._totalPoints || 0;
         const loaded = this._loadedPoints || 0;
@@ -1501,6 +1711,17 @@ class PointCloudViewer {
         }
     }
 
+    _cancelStateUpload(state) {
+        if (!state) return;
+        if (state.uploadRaf) {
+            cancelAnimationFrame(state.uploadRaf);
+            state.uploadRaf = null;
+        }
+        state.uploadDirtyStart = Infinity;
+        state.uploadDirtyEnd = -Infinity;
+        state.uploadQueueLength = 0;
+    }
+
     _captureViewState() {
         if (!this.pointCloud) return null;
         return {
@@ -1536,8 +1757,7 @@ class PointCloudViewer {
         }
         this._loadedPoints = 0;
         this._totalPoints = 0;
-        this._updatePerf({
-            livePointClouds: 0,
+        this._refreshResourceCounters({
             visiblePoints: 0,
             loadedPoints: 0,
             totalPoints: 0,
@@ -1576,6 +1796,13 @@ class PointCloudViewer {
                 loadId: 0,
                 status: 'idle',
                 partialChunks: new Map(),
+                fetchInFlight: 0,
+                decodeQueueLength: 0,
+                uploadRaf: null,
+                uploadDirtyStart: Infinity,
+                uploadDirtyEnd: -Infinity,
+                uploadQueueLength: 0,
+                dirtyUploadRanges: 0,
                 networkBytes: 0,
                 cachedBytes: 0,
                 partialResumeBytes: 0,
@@ -1604,22 +1831,48 @@ class PointCloudViewer {
         }
     }
 
+    _abortAllStreams() {
+        for (const state of this.sceneStates.values()) {
+            this._abortStateStream(state);
+            this._cancelStateUpload(state);
+        }
+    }
+
+    _disposeStateGpu(state) {
+        if (!state?.pointCloud) return;
+        this._cancelStateUpload(state);
+        state.pointCloud.parent?.remove(state.pointCloud);
+        state.pointCloud.geometry?.dispose();
+        state.pointCloud.material?.dispose();
+        state.pointCloud = null;
+        state.geometry = null;
+        if (this.pointCloud && this.currentState === state) this.pointCloud = null;
+    }
+
     _detachCurrentState(nextKey) {
         const state = this.currentState;
         if (!state || state.key === nextKey) return;
         this._captureStateView(state);
         this._abortStateStream(state);
-        if (state.pointCloud?.parent === this.scene) {
-            this.scene.remove(state.pointCloud);
-        }
+        this._disposeStateGpu(state);
         this.pointCloud = null;
         this.currentState = null;
         this.clearMeasurement();
-        this._updatePerf({ livePointClouds: 0 });
+        this._refreshResourceCounters();
     }
 
     async _activateState(key, cfg) {
         if (!cfg?.cloud) return;
+        if (this._contextLost) {
+            this.setMessage('WebGL context is recovering. Reselect the scene in a moment.');
+            this._updatePerf({
+                activeScene: key,
+                status: 'webgl-context-lost',
+                lastError: 'WebGL context lost',
+                effectiveConfig: this._effectiveConfigSummary(cfg),
+            });
+            return;
+        }
         this._detachCurrentState(key);
         const state = this._getState(key, cfg);
         state.lastActive = Date.now();
@@ -1631,6 +1884,11 @@ class PointCloudViewer {
         this._baseSamplingRate = Math.max(0, Math.min(1, cfg.samplingRate != null ? cfg.samplingRate : 1));
         this._loadingBudget = false;
         this._interactionBudget = false;
+
+        if (!state.pointCloud && state.manifest && state.positions && state.colors) {
+            this._ensureStateGeometry(state);
+            this._queueUploadRange(state, 0, state.loadedPoints || 0);
+        }
 
         if (state.pointCloud) {
             this.pointCloud = state.pointCloud;
@@ -1648,6 +1906,9 @@ class PointCloudViewer {
 
         this._startOrResumeState(state);
         this._trimInactiveStates();
+        this._refreshResourceCounters({
+            effectiveConfig: this._effectiveConfigSummary(cfg),
+        });
     }
 
     _ensureStateGeometry(state) {
@@ -1659,18 +1920,29 @@ class PointCloudViewer {
             min: state.manifest.min,
             scale: state.manifest.scale,
         };
-        state.positions = new Float32Array(state.manifest.count * 3);
-        state.colors = new Uint8Array(state.manifest.count * 3);
-        state.loadedChunks = new Uint8Array(state.manifest.chunkCount);
+        if (!state.positions || state.positions.length !== state.manifest.count * 3) {
+            state.positions = new Float32Array(state.manifest.count * 3);
+        }
+        if (!state.colors || state.colors.length !== state.manifest.count * 3) {
+            state.colors = new Uint8Array(state.manifest.count * 3);
+        }
+        if (!state.loadedChunks || state.loadedChunks.length !== state.manifest.chunkCount) {
+            state.loadedChunks = new Uint8Array(state.manifest.chunkCount);
+            state.loadedChunkCount = 0;
+            state.contiguousChunks = 0;
+            state.loadedPoints = 0;
+            state.visiblePoints = 0;
+            state.revealed = false;
+        }
         state.xform = computeXformFromHeader(header, state.cfg);
         this._cancelPendingFlush();
         state.geometry = this._installGeometry(
             state.positions, state.colors, state.manifest.count, 0, state.cfg, state.xform.radius
         );
         state.pointCloud = this.pointCloud;
-        state.pointCloud.visible = false;
+        state.pointCloud.visible = !!state.revealed;
         this._totalPoints = state.manifest.count;
-        this._loadedPoints = 0;
+        this._loadedPoints = state.loadedPoints || 0;
         if (state.view) this._restoreViewState(state.view);
     }
 
@@ -1707,6 +1979,12 @@ class PointCloudViewer {
             cachedBytes: state.cachedBytes,
             partialResumeBytes: state.partialResumeBytes,
             redownloadedChunks: state.redownloadedChunks,
+            inflightFetches: state.fetchInFlight || 0,
+            decodeQueueLength: state.decodeQueueLength || 0,
+            uploadQueueLength: state.uploadQueueLength || 0,
+            dirtyUploadRanges: state.dirtyUploadRanges || 0,
+            effectiveConfig: this._effectiveConfigSummary(state.cfg),
+            lastError: null,
         });
         state.loadPromise = this._streamState(state, loadId, abort)
             .finally(() => {
@@ -1742,62 +2020,134 @@ class PointCloudViewer {
             this._commitStateProgress(state);
 
             let nextToSchedule = 0;
-            const active = new Map();
+            const activeFetches = new Map();
+            const decodeQueue = [];
             const schedule = () => {
-                while (active.size < CHUNK_FETCH_WINDOW && nextToSchedule < state.manifest.chunkCount) {
+                while (activeFetches.size < CHUNK_FETCH_WINDOW && nextToSchedule < state.manifest.chunkCount) {
                     const idx = nextToSchedule++;
                     if (state.loadedChunks[idx]) continue;
-                    active.set(idx, this._loadChunk(state, idx, abort.signal)
-                        .then(() => idx)
-                        .finally(() => active.delete(idx)));
+                    const task = this._fetchChunkForState(state, idx, abort.signal)
+                        .then(result => {
+                            if (result && !isStale()) decodeQueue.push(result);
+                            state.decodeQueueLength = decodeQueue.length;
+                            return idx;
+                        })
+                        .finally(() => {
+                            activeFetches.delete(idx);
+                            state.fetchInFlight = activeFetches.size;
+                            if (this.currentState === state) {
+                                this._updatePerf({
+                                    inflightFetches: state.fetchInFlight,
+                                    decodeQueueLength: state.decodeQueueLength,
+                                });
+                            }
+                        });
+                    activeFetches.set(idx, task);
+                    state.fetchInFlight = activeFetches.size;
+                }
+                if (this.currentState === state) {
+                    this._updatePerf({
+                        inflightFetches: state.fetchInFlight,
+                        decodeQueueLength: state.decodeQueueLength,
+                    });
                 }
             };
 
             while (!isStale()) {
                 schedule();
-                if (!active.size) break;
-                await Promise.race(active.values());
+                if (decodeQueue.length) {
+                    const item = decodeQueue.shift();
+                    state.decodeQueueLength = decodeQueue.length;
+                    await this._decodeFetchedChunk(state, item.index, item.bytes, abort.signal);
+                    await nextFrame();
+                    continue;
+                }
+                if (!activeFetches.size) break;
+                await Promise.race(activeFetches.values());
             }
             if (isStale()) return;
+            if (state.uploadRaf) await nextFrame();
 
             state.status = 'ready';
             state.revealed = true;
+            state.fetchInFlight = 0;
+            state.decodeQueueLength = 0;
             this.activeQuality = 'full';
             this.setMessage('');
             this._commitStateProgress(state);
             this._updatePerf({
                 loading: false,
                 status: 'ready',
+                inflightFetches: 0,
+                decodeQueueLength: 0,
+                uploadQueueLength: state.uploadQueueLength || 0,
                 completedLoads: window.__UNIT_DEMO_PERF.completedLoads + 1,
             });
+            if (this.loader?.estimateCacheBytes) {
+                this.loader.estimateCacheBytes(0).then(cacheBytes => {
+                    this._updatePerf({ cacheBytes });
+                }).catch(() => {});
+            }
             if (this.onSceneReady && this.currentState === state) {
                 this.onSceneReady(state.key, state.cfg);
             }
         } catch (err) {
             if (err.name === 'AbortError' || abort.signal.aborted) {
                 if (state.status === 'loading' || state.status === 'streaming') state.status = 'aborted';
-                if (this.currentState === state) this._updatePerf({ loading: false, status: 'aborted' });
+                state.fetchInFlight = 0;
+                state.decodeQueueLength = 0;
+                if (this.currentState === state) {
+                    this._updatePerf({
+                        loading: false,
+                        status: 'aborted',
+                        inflightFetches: 0,
+                        decodeQueueLength: 0,
+                    });
+                }
                 return;
             }
             console.error('Error loading point cloud:', err);
             state.status = 'error';
+            state.fetchInFlight = 0;
+            state.decodeQueueLength = 0;
             if (this.currentState === state) {
                 this.setMessage('Failed to load point cloud');
-                this._updatePerf({ loading: false, status: 'error' });
+                this._updatePerf({
+                    loading: false,
+                    status: 'error',
+                    inflightFetches: 0,
+                    decodeQueueLength: 0,
+                    lastError: err.message || String(err),
+                });
             }
         }
     }
 
-    async _loadChunk(state, index, signal) {
+    async _fetchChunkForState(state, index, signal) {
         if (state.loadedChunks[index]) return;
         const { bytes } = await this.loader.fetchChunk(state, index, signal);
+        return { index, bytes };
+    }
+
+    async _decodeFetchedChunk(state, index, bytes, signal) {
         if (signal?.aborted || state.loadedChunks[index]) return;
+        if (this._contextLost) throw new DOMException('Aborted', 'AbortError');
         const raw = await decompressGzipBytes(bytes);
+        if (signal?.aborted || state.loadedChunks[index]) return;
+        await nextFrame();
         if (signal?.aborted || state.loadedChunks[index]) return;
         this._decodeChunkIntoState(state, index, raw);
         state.loadedChunks[index] = 1;
         state.loadedChunkCount += 1;
-        this._commitStateProgress(state, index);
+        this._updateLoadedPrefix(state);
+        this._queueChunkUpload(state, index);
+        if (this.currentState === state) {
+            this._updatePerf({
+                loadedChunkCount: state.loadedChunkCount,
+                loadedPoints: state.loadedPoints,
+                decodeQueueLength: state.decodeQueueLength,
+            });
+        }
     }
 
     _decodeChunkIntoState(state, index, raw) {
@@ -1827,7 +2177,7 @@ class PointCloudViewer {
         return Math.min(state.manifest.count, targetLoaded);
     }
 
-    _commitStateProgress(state, dirtyChunkIndex = null) {
+    _updateLoadedPrefix(state) {
         while (state.contiguousChunks < state.manifest.chunkCount &&
                state.loadedChunks[state.contiguousChunks]) {
             state.contiguousChunks += 1;
@@ -1836,20 +2186,67 @@ class PointCloudViewer {
             ? state.manifest.count
             : state.manifest.chunks[state.contiguousChunks]?.firstPoint || 0;
         state.loadedPoints = contiguousPoints;
-        this._totalPoints = state.manifest.count;
-        this._loadedPoints = contiguousPoints;
-
-        if (dirtyChunkIndex != null && state.geometry && this.currentState === state) {
-            const chunk = state.manifest.chunks[dirtyChunkIndex];
-            const posAttr = state.geometry.getAttribute('position');
-            const colAttr = state.geometry.getAttribute('color');
-            posAttr.updateRange.offset = chunk.firstPoint * 3;
-            posAttr.updateRange.count = chunk.pointCount * 3;
-            posAttr.needsUpdate = true;
-            colAttr.updateRange.offset = chunk.firstPoint * 3;
-            colAttr.updateRange.count = chunk.pointCount * 3;
-            colAttr.needsUpdate = true;
+        if (this.currentState === state) {
+            this._totalPoints = state.manifest.count;
+            this._loadedPoints = contiguousPoints;
         }
+        return contiguousPoints;
+    }
+
+    _queueChunkUpload(state, index) {
+        const chunk = state.manifest.chunks[index];
+        this._queueUploadRange(state, chunk.firstPoint, chunk.pointCount);
+    }
+
+    _queueUploadRange(state, firstPoint, pointCount) {
+        if (!state?.geometry || this.currentState !== state || !pointCount || this._contextLost) return;
+        state.uploadDirtyStart = Math.min(state.uploadDirtyStart, firstPoint);
+        state.uploadDirtyEnd = Math.max(state.uploadDirtyEnd, firstPoint + pointCount);
+        state.uploadQueueLength = 1;
+        state.dirtyUploadRanges += 1;
+        if (state.uploadRaf) {
+            this._updatePerf({
+                uploadQueueLength: state.uploadQueueLength,
+                dirtyUploadRanges: state.dirtyUploadRanges,
+            });
+            return;
+        }
+        state.uploadRaf = requestAnimationFrame(() => {
+            state.uploadRaf = null;
+            if (this.currentState !== state || !state.geometry || this._contextLost) {
+                state.uploadDirtyStart = Infinity;
+                state.uploadDirtyEnd = -Infinity;
+                state.uploadQueueLength = 0;
+                return;
+            }
+            const start = state.uploadDirtyStart;
+            const end = state.uploadDirtyEnd;
+            state.uploadDirtyStart = Infinity;
+            state.uploadDirtyEnd = -Infinity;
+            state.uploadQueueLength = 0;
+            if (Number.isFinite(start) && end > start) {
+                const posAttr = state.geometry.getAttribute('position');
+                const colAttr = state.geometry.getAttribute('color');
+                const attrOffset = start * 3;
+                const attrCount = (end - start) * 3;
+                posAttr.updateRange.offset = attrOffset;
+                posAttr.updateRange.count = attrCount;
+                posAttr.needsUpdate = true;
+                colAttr.updateRange.offset = attrOffset;
+                colAttr.updateRange.count = attrCount;
+                colAttr.needsUpdate = true;
+            }
+            this._commitStateProgress(state);
+        });
+        this._updatePerf({
+            uploadQueueLength: state.uploadQueueLength,
+            dirtyUploadRanges: state.dirtyUploadRanges,
+        });
+    }
+
+    _commitStateProgress(state, dirtyChunkIndex = null) {
+        if (dirtyChunkIndex != null) this._queueChunkUpload(state, dirtyChunkIndex);
+        const contiguousPoints = this._updateLoadedPrefix(state);
 
         if (!state.revealed && contiguousPoints >= this._firstPaintTarget(state)) {
             state.revealed = true;
@@ -1880,18 +2277,19 @@ class PointCloudViewer {
                 cachedBytes: state.cachedBytes,
                 partialResumeBytes: state.partialResumeBytes,
                 redownloadedChunks: state.redownloadedChunks,
+                inflightFetches: state.fetchInFlight || 0,
+                decodeQueueLength: state.decodeQueueLength || 0,
+                uploadQueueLength: state.uploadQueueLength || 0,
+                dirtyUploadRanges: state.dirtyUploadRanges || 0,
                 livePointClouds: this.pointCloud ? 1 : 0,
             });
+            this._refreshResourceCounters();
         }
     }
 
     _disposeDecodedState(state) {
         if (!state || state === this.currentState) return;
-        if (state.pointCloud) {
-            state.pointCloud.parent?.remove(state.pointCloud);
-            state.pointCloud.geometry.dispose();
-            state.pointCloud.material.dispose();
-        }
+        this._disposeStateGpu(state);
         state.positions = null;
         state.colors = null;
         state.geometry = null;
@@ -1902,14 +2300,26 @@ class PointCloudViewer {
         state.loadedPoints = 0;
         state.visiblePoints = 0;
         state.revealed = false;
-        if (state.status !== 'ready') state.status = 'idle';
+        state.status = 'idle';
+        state.partialChunks.clear();
     }
 
     _trimInactiveStates() {
         const inactive = Array.from(this.sceneStates.values())
-            .filter(s => s !== this.currentState && s.pointCloud && !s.loadPromise)
+            .filter(s => s !== this.currentState && (s.positions || s.pointCloud) && !s.loadPromise)
             .sort((a, b) => b.lastActive - a.lastActive);
-        inactive.slice(1).forEach(s => this._disposeDecodedState(s));
+        let retainedBytes = 0;
+        inactive.forEach((state, index) => {
+            const bytes = this._decodedBytesForState(state);
+            const keep = index === 0 && retainedBytes + bytes <= MAX_INACTIVE_DECODED_BYTES;
+            if (keep) {
+                retainedBytes += bytes;
+                this._disposeStateGpu(state);
+            } else {
+                this._disposeDecodedState(state);
+            }
+        });
+        this._refreshResourceCounters();
     }
 
     // Runtime setters used by the view controls panel.  All of them no-op
@@ -2102,7 +2512,7 @@ class PointCloudViewer {
     }
 
     _syncRenderLoop() {
-        const shouldRender = this._inViewport && this._docVisible;
+        const shouldRender = this._inViewport && this._docVisible && !this._contextLost;
         if (shouldRender && !this._rafId) {
             this.animate();
         } else if (!shouldRender && this._rafId) {
@@ -2112,7 +2522,7 @@ class PointCloudViewer {
     }
 
     animate() {
-        if (!this._inViewport || !this._docVisible) {
+        if (!this._inViewport || !this._docVisible || this._contextLost) {
             this._rafId = null;
             return;
         }
