@@ -1421,6 +1421,23 @@ class PointCloudViewer {
         }
     }
 
+    _captureViewState() {
+        if (!this.pointCloud) return null;
+        return {
+            cameraPosition: this.camera.position.clone(),
+            controlsTarget: this.controls.target.clone(),
+            rotation: this.pointCloud.rotation.clone(),
+        };
+    }
+
+    _restoreViewState(state) {
+        if (!state || !this.pointCloud) return;
+        this.camera.position.copy(state.cameraPosition);
+        this.controls.target.copy(state.controlsTarget);
+        this.pointCloud.rotation.copy(state.rotation);
+        this.controls.update();
+    }
+
     setMessage(text) {
         if (!this.messageEl) return;
         this.messageEl.textContent = text;
@@ -1473,7 +1490,10 @@ class PointCloudViewer {
     }
 
     showFull(key, cfg) {
-        if (this.activeKey === key && this.pointCloud && this.activeQuality === 'full' && !this.activeAbort) {
+        if (this.activeKey === key && (
+            this.activeQuality === 'loading-full' ||
+            this.activeQuality === 'full'
+        )) {
             return Promise.resolve();
         }
         return this._show(key, cfg, 'full');
@@ -1549,6 +1569,7 @@ class PointCloudViewer {
 
             const onHeader = (header) => {
                 if (isStale()) return;
+                const previousView = this._captureViewState();
                 this._cancelPendingFlush();
                 positions = new Float32Array(header.count * 3);
                 colors    = new Uint8Array(header.count * 3);
@@ -1566,6 +1587,9 @@ class PointCloudViewer {
                     visiblePoints: 0,
                     livePointClouds: this.pointCloud ? 1 : 0,
                 });
+                if (previousView && quality === 'full') {
+                    this._restoreViewState(previousView);
+                }
             };
 
             const onBlock = (header, bytes, byteOffset, blockCount) => {
