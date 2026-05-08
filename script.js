@@ -194,10 +194,10 @@ function initDeferredDemo() {
 //                   uses a +Y-down convention)
 //   camera        — unit offset from the bounding-sphere centre,
 //                   scaled by the sphere radius on load
-//   samplingRate  — fraction of points drawn [0..1].  Because the
-//                   .pnts stream is randomly shuffled, any chunk prefix
-//                   is a uniform spatial sample — so this is just a
-//                   drawRange cutoff, no re-sampling cost.
+//   samplingRate  — manual controls-panel override only.  Baked and
+//                   remote defaults stay at 1.0 so the stream has one
+//                   stable full-density progression instead of racing
+//                   between sparse and dense display states.
 //   brightness    — scalar multiplier applied to vertex colours in
 //                   the fragment shader (values > 1 are allowed;
 //                   they brighten under-exposed scans).
@@ -310,7 +310,7 @@ const DEMO_CONFIGS = {
         pointSize: 0.0000,
         flipY: true,
         camera: { x: -0.349, y: 0.244, z: -1.117 },
-        samplingRate: 0.800,
+        samplingRate: 1.000,
         brightness: 1.00,
         background: '#ffffff',
         rotation: { x: -3, y: 43, z: 0 }
@@ -321,7 +321,7 @@ const DEMO_CONFIGS = {
         pointSize: 0.000001,
         flipY: true,
         camera: { x: -0.250, y: 0.250, z: -0.750 },
-        samplingRate: 0.800,
+        samplingRate: 1.000,
         brightness: 1.00,
         background: '#ffffff',
         rotation: { x: -16, y: -46, z: 0 }
@@ -332,7 +332,7 @@ const DEMO_CONFIGS = {
         pointSize: 0.000001,
         flipY: true,
         camera: { x: -0.361, y: 0.180, z: -1.263 },
-        samplingRate: 0.800,
+        samplingRate: 1.000,
         brightness: 1.00,
         background: '#ffffff',
         rotation: { x: -23, y: 4, z: 0 }
@@ -343,16 +343,16 @@ const DEMO_CONFIGS = {
         pointSize: 0.103814,
         flipY: true,
         camera: { x: -0.308, y: 0.451, z: -1.025 },
-        samplingRate: 0.980,
+        samplingRate: 1.000,
         brightness: 1.00,
         background: '#ffffff',
         rotation: { x: 23, y: 10, z: 0 }
     }
 };
 
-// Bumped to v2 so existing per-user overrides from the old baked
-// defaults are discarded in favour of the new DEMO_CONFIGS values.
-const CONTROLS_STORAGE_KEY = 'unit-demo-controls-v2';
+// Bumped to v3 so old per-user sampling overrides cannot reintroduce
+// sparse/dense display races after the streaming migration.
+const CONTROLS_STORAGE_KEY = 'unit-demo-controls-v3';
 
 const CACHE_NAME = 'unit-pnt-v12';
 const PNTS_DB_NAME = 'unit-pnts-v12';
@@ -452,11 +452,14 @@ async function applyRemoteConfig() {
         for (const [key, patch] of Object.entries(remote)) {
             if (!DEMO_CONFIGS[key] || !patch || typeof patch !== 'object') continue;
             const baked = DEMO_CONFIGS[key];
+            const stablePatch = { ...patch };
+            delete stablePatch.samplingRate;
             DEMO_CONFIGS[key] = {
                 ...baked,
-                ...patch,
-                camera:   { ...(baked.camera   || {}), ...(patch.camera   || {}) },
-                rotation: { ...(baked.rotation || {}), ...(patch.rotation || {}) },
+                ...stablePatch,
+                samplingRate: 1.0,
+                camera:   { ...(baked.camera   || {}), ...(stablePatch.camera   || {}) },
+                rotation: { ...(baked.rotation || {}), ...(stablePatch.rotation || {}) },
             };
             patched.push(key);
         }
@@ -509,7 +512,6 @@ async function initDemo() {
             if (viewer.currentState) viewer.currentState.cfg = resolved;
             // Update live viewer state without re-loading the cloud.
             viewer.setPointSize(resolved.pointSize);
-            if (resolved.samplingRate != null) viewer.setSamplingRate(resolved.samplingRate);
             if (resolved.brightness   != null) viewer.setBrightness(resolved.brightness);
             if (resolved.background)           viewer.setBackground(resolved.background);
             if (resolved.rotation)             viewer.setRotation(resolved.rotation);
@@ -2330,7 +2332,7 @@ class ViewerControls {
             const override = this.overrides[key] || {};
             payload[key] = {
                 pointSize:    override.pointSize    != null ? override.pointSize    : baked.pointSize,
-                samplingRate: override.samplingRate != null ? override.samplingRate : baked.samplingRate,
+                samplingRate: 1.0,
                 brightness:   override.brightness   != null ? override.brightness   : baked.brightness,
                 background:   override.background   != null ? override.background   : baked.background,
                 camera:   { ...(baked.camera   || {}), ...(override.camera   || {}) },
