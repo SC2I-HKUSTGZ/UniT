@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=20260520-hfdemo">
     <link rel="preload" as="image" href="assets/videos/intro_poster.jpg">
 </head>
 <body>
@@ -63,8 +63,8 @@
         <div class="chapters">
             <button class="selected" data-section="overview">Overview</button>
             <button data-section="demo">Examples</button>
+            <button data-section="hf-demo">Try It</button>
             <button data-section="results">Results</button>
-            <!-- <button data-section="hf-demo">Try It</button> -->
         </div>
     </div>
 
@@ -188,6 +188,28 @@
         </div>
     </div>
 
+    <!-- Hugging Face Demo -->
+    <div class="demo-container" id="hf-demo">
+        <h2>Try It Yourself</h2>
+        <p class="demo-description">Upload your images and run UniT directly in your browser.</p>
+        <div class="hf-space-wrapper">
+            <iframe
+                src="https://enceladush-unit.hf.space/"
+                frameborder="0"
+                width="100%"
+                height="720"
+                title="UniT Demo"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                allowfullscreen
+            ></iframe>
+        </div>
+        <p class="demo-link">
+            <a href="https://enceladush-unit.hf.space/" target="_blank" rel="noopener noreferrer">
+                Open in Hugging Face Spaces →
+            </a>
+        </p>
+    </div>
+
     <!-- Results -->
     <div class="results" id="results">
         <h2>Results</h2>
@@ -257,30 +279,6 @@
             <figcaption>Fig. 8. Qualitative results on multi-view reconstruction. All point clouds are presented in their raw form, without any alignment or filtering. Point clouds within the same row are displayed at a consistent scene scale.</figcaption>
         </figure>
     </div>
-
-    <!-- Hugging Face Demo (temporarily hidden — Hugging Face Space is currently unavailable)
-    <div class="demo-container" id="hf-demo">
-        <h2>Try It Yourself</h2>
-        <p class="demo-description">Upload your images and run UniT directly in your browser.</p>
-        <div class="hf-space-wrapper">
-            <iframe
-                src="https://SC2I-HKUSTGZ-UniT.hf.space"
-                frameborder="0"
-                width="100%"
-                height="600"
-                title="UniT Demo"
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                allowfullscreen
-            ></iframe>
-        </div>
-        <p class="demo-link">
-            <a href="https://huggingface.co/spaces/SC2I-HKUSTGZ/UniT" target="_blank">
-                Open in Hugging Face Spaces →
-            </a>
-        </p>
-    </div>
-    -->
-
 
     <!-- Citation -->
     <div class="citation">
