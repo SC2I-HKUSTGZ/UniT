@@ -234,6 +234,13 @@ sup {
     box-sizing: border-box;
 }
 
+.overview-image {
+    width: 65%;
+    max-width: 100%;
+    border-radius: 20px;
+    display: inline-block;
+}
+
 .capabilities-images {
     display: flex;
     gap: 10px;
@@ -1227,36 +1234,100 @@ footer {
 /* Responsive */
 @media (max-width: 600px) {
     body {
-        margin: 20px auto;
-        padding: 0 15px;
+        margin: 0 auto 24px;
+        padding: max(30px, calc(env(safe-area-inset-top) + 18px)) 12px 24px;
     }
     
-    h1 { font-size: 1.5em; }
-    h2 { font-size: 1.4em; }
+    h1 {
+        max-width: 24rem;
+        margin: 0 auto 18px;
+        font-size: clamp(1.55rem, 6.4vw, 1.95rem);
+        line-height: 1.12;
+    }
+
+    h2 {
+        font-size: 1.4em;
+    }
     
-    .authors { font-size: 0.75em; }
-    .authors span { margin: 0 3px; }
-    .affiliations { font-size: 0.7em; }
-    .links { gap: 10px; }
-    .links a { min-width: 92px; height: 40px; padding: 8px 15px; }
+    .authors {
+        margin-bottom: 10px;
+        font-size: 0.8rem;
+        line-height: 1.45;
+    }
+
+    .authors span {
+        margin: 0 3px;
+    }
+
+    .affiliations {
+        margin-bottom: 24px;
+        font-size: 0.74rem;
+        line-height: 1.45;
+    }
+
+    .links {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+        margin-bottom: 30px;
+    }
+
+    .links a {
+        width: 100%;
+        min-width: 0;
+        height: 42px;
+        padding: 8px 10px;
+        gap: 7px;
+        font-size: 0.94rem;
+    }
+
+    .links a svg,
+    .links a img {
+        width: 18px;
+        height: 18px;
+    }
     
     .abstract, .citation, .visualization-container, .method, .results, .capabilities, .demo-container, .acknowledgements {
-        padding: 18px;
+        padding: 20px 16px;
         border-radius: 14px;
+        margin-bottom: 24px;
     }
     
-    .video-container { border-radius: 14px; }
-    .video-container video { border-radius: 14px 14px 0 0; }
-    .video-placeholder { border-radius: 12px; }
+    .video-container {
+        border-radius: 14px;
+        margin-bottom: 24px;
+    }
+
+    .video-container video {
+        aspect-ratio: 16 / 9;
+        border-radius: 14px 14px 0 0;
+        background: #fff;
+        object-fit: contain;
+    }
+
+    .video-placeholder {
+        border-radius: 12px;
+    }
     
     .abstract h2, .citation h2, .visualization-container h2, .method h2, .results h2, .capabilities h2, .demo-container h2, .acknowledgements h2 {
-        font-size: 1.3em;
+        margin-bottom: 0.8em;
+        font-size: 1.45rem;
+        line-height: 1.2;
     }
-    
+
+    .chapters {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+        margin-bottom: 0;
+        padding: 12px;
+    }
+
     .chapters button {
-        flex-basis: 80px;
-        padding: 5px 6px;
-        font-size: 0.75em;
+        min-height: 40px;
+        padding: 6px 8px;
+        font-size: 0.82rem;
+        line-height: 1.2;
     }
     
     .visualization {
@@ -1267,7 +1338,53 @@ footer {
     #canvas { border-radius: 12px; }
     
     .abstract p, .method p, .results p, .capabilities p, .acknowledgements p {
-        font-size: 0.95em;
+        text-align: left;
+        font-size: 0.95rem;
+        line-height: 1.58;
+    }
+
+    .fig-container {
+        padding: 0;
+        border-radius: 10px;
+    }
+
+    .overview-image {
+        width: 100%;
+        border-radius: 12px;
+    }
+
+    .demo-description {
+        margin-bottom: 16px;
+        font-size: 0.95rem;
+        line-height: 1.5;
+    }
+
+    .hf-space-wrapper {
+        display: none;
+    }
+
+    .demo-link {
+        margin-top: 0;
+    }
+
+    .demo-link a {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        min-height: 42px;
+        padding: 9px 14px;
+        border-radius: 8px;
+        background: #1a73e8;
+        color: #fff;
+        text-decoration: none;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+
+    .demo-link a:hover {
+        background: #185abc;
+        color: #fff;
+        text-decoration: none;
     }
 
     .result-table-list {
@@ -1286,31 +1403,40 @@ footer {
 
     .result-task-title {
         width: 100%;
-        margin-bottom: -6px;
-        font-size: 1.05em;
+        margin: 4px 0 -4px;
+        font-size: 1.05rem;
+        line-height: 1.25;
+    }
+
+    .result-task-desc,
+    .result-group-caption {
+        font-size: 0.88rem;
+        line-height: 1.45;
     }
 
     .result-figure {
-        overflow-x: auto;
+        overflow: hidden;
     }
 
-    .result-figure img {
-        min-width: 760px;
-    }
-
+    .result-figure img,
     .result-figure-wide img {
-        min-width: 680px;
+        width: 100%;
+        min-width: 0;
+        max-width: 100%;
+        height: auto;
+    }
+
+    .result-figure figcaption {
+        padding: 10px 12px;
+        font-size: 0.84rem;
+        line-height: 1.42;
     }
     
     .citation pre {
-        padding: 15px;
+        padding: 14px;
         border-radius: 10px;
-        font-size: 0.8em;
-    }
-    
-    .fig-container {
-        padding: 0;
-        border-radius: 10px;
+        font-size: 0.72rem;
+        line-height: 1.55;
     }
     
     .capabilities-images {
