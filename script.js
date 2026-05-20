@@ -58,40 +58,118 @@ document.addEventListener('DOMContentLoaded', () => {
 //
 // index.html ships the intro video with `preload="none"` so the
 // 18 MB mp4 doesn't race the 55 MB default point cloud at page load.
-// Flip it to `auto` + call play() only once the element is within the
-// viewport.  In practice the intro is above the fold, so this fires
-// within the first few hundred ms of page load — but *after* the
-// viewer has already started streaming its cloud.
+// Mobile browsers, especially Safari, can treat that as a poster-only
+// video unless we explicitly arm muted inline playback after first
+// visibility.  Keep retrying only while the video is inline and visible.
 // ========================================
 function initIntroVideo() {
     const v = document.getElementById('intro-video');
     if (!v) return;
-    // Once the video enters the viewport, nudge preload to "auto" so
-    // browsers that treat `preload="none" autoplay` as a no-op (Safari)
-    // still start playback.  We intentionally do NOT call v.load() — that
-    // resets currentTime and forces a re-fetch even if Chrome has already
-    // begun loading via the intrinsic autoplay path.  Just flipping
-    // preload + calling play() is the minimum work needed.
-    const arm = () => {
+
+    let introVisible = false;
+    let requestedLoad = false;
+    let retryTimer = null;
+    let retryCount = 0;
+    const maxRetries = 6;
+
+    const isFullPlaybackMode = () =>
+        v.controls || document.fullscreenElement === v || v.webkitDisplayingFullscreen;
+
+    const shouldAutoplayInline = () =>
+        introVisible && !document.hidden && !isFullPlaybackMode();
+
+    const prepareInlineAutoplay = () => {
+        v.muted = true;
+        v.defaultMuted = true;
+        v.playsInline = true;
+        v.setAttribute('muted', '');
+        v.setAttribute('playsinline', '');
+        v.setAttribute('webkit-playsinline', '');
         if (v.preload !== 'auto') v.preload = 'auto';
-        if (v.paused) {
-            const p = v.play();
-            if (p && typeof p.catch === 'function') p.catch(() => {});
+
+        if (!requestedLoad && v.readyState === 0) {
+            requestedLoad = true;
+            v.load();
         }
     };
+
+    const scheduleAutoplayRetry = () => {
+        if (retryTimer || retryCount >= maxRetries) return;
+        retryCount += 1;
+        const delay = Math.min(2000, 250 * retryCount);
+        retryTimer = window.setTimeout(() => {
+            retryTimer = null;
+            arm();
+        }, delay);
+    };
+
+    const clearAutoplayRetry = () => {
+        if (!retryTimer) return;
+        window.clearTimeout(retryTimer);
+        retryTimer = null;
+    };
+
+    const startPlayback = ({ respectInlineMode = true } = {}) => {
+        if (respectInlineMode && !shouldAutoplayInline()) return;
+        prepareInlineAutoplay();
+        if (!v.paused && !v.ended) {
+            retryCount = 0;
+            clearAutoplayRetry();
+            return;
+        }
+
+        const p = v.play();
+        if (!p || typeof p.then !== 'function') return;
+        p.then(() => {
+            retryCount = 0;
+            clearAutoplayRetry();
+        }).catch(() => {
+            if (respectInlineMode && shouldAutoplayInline()) scheduleAutoplayRetry();
+        });
+    };
+
+    const arm = () => startPlayback();
+
     if ('IntersectionObserver' in window) {
-        const io = new IntersectionObserver((entries, obs) => {
+        const io = new IntersectionObserver((entries) => {
             for (const e of entries) {
-                if (!e.isIntersecting) continue;
-                obs.disconnect();
-                arm();
+                if (e.target !== v) continue;
+                introVisible = e.isIntersecting;
+                if (introVisible) {
+                    retryCount = 0;
+                    arm();
+                } else {
+                    clearAutoplayRetry();
+                }
             }
         }, { threshold: 0.1 });
         io.observe(v);
     } else {
         // Older browser — just arm it after the viewer has a head start.
+        introVisible = true;
         setTimeout(arm, 800);
     }
+
+    v.addEventListener('loadeddata', arm);
+    v.addEventListener('canplay', arm);
+    v.addEventListener('pause', () => {
+        if (shouldAutoplayInline()) scheduleAutoplayRetry();
+    });
+    v.addEventListener('playing', () => {
+        retryCount = 0;
+        clearAutoplayRetry();
+    });
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) {
+            retryCount = 0;
+            arm();
+        }
+    });
+    window.addEventListener('pageshow', () => {
+        retryCount = 0;
+        arm();
+    });
+    window.addEventListener('focus', arm);
 
     const canUseFullscreen =
         typeof v.webkitEnterFullscreen === 'function' ||
@@ -113,7 +191,7 @@ function initIntroVideo() {
     };
 
     const enterFullscreen = async () => {
-        arm();
+        startPlayback({ respectInlineMode: false });
         v.controls = true;
 
         if (typeof v.webkitEnterFullscreen === 'function') {
