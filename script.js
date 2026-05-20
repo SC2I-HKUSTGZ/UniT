@@ -55,7 +55,7 @@ document.addEventListener('DOMContentLoaded', () => {
 // ========================================
 // Intro video — lazy load
 //
-// protected.html ships the intro video with `preload="none"` so the
+// index.html ships the intro video with `preload="none"` so the
 // 18 MB mp4 doesn't race the 55 MB default point cloud at page load.
 // Flip it to `auto` + call play() only once the element is within the
 // viewport.  In practice the intro is above the fold, so this fires
@@ -2617,7 +2617,7 @@ class ViewerControls {
         this.toggle = document.getElementById('controls-toggle-btn');
 
         // Bail silently if the panel markup isn't present (e.g. on an old
-        // cached protected.html); the viewer still runs, just without the
+        // cached index.html); the viewer still runs, just without the
         // settings UI.
         if (!this.panel || !this.toggle) return;
 
