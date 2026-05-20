@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css?v=20260520-balanced-examples">
+    <link rel="stylesheet" href="style.css?v=20260520-mobile-polish">
     <link rel="preload" as="image" href="assets/videos/intro_poster.jpg">
 </head>
 <body>
@@ -72,7 +72,7 @@
     <div class="method" id="overview">
         <h2>Overview</h2>
         <div class="fig-container" style="text-align:center;">
-            <img src="assets/overview.png" alt="UniT Overview" style="width:65%; max-width:100%; border-radius:20px; display:inline-block;">
+            <img class="overview-image" src="assets/overview.png" alt="UniT Overview">
         </div>
         <p>
             We present <strong>UniT</strong>, a unified feed-forward model that reformulates a wide range of geometry perception capabilities into a single framework, covering diverse <em>view configurations</em>, <em>modality combinations</em>, <em>metric-scale perception</em>, and <em>long-horizon scalability</em>. It supports both online and offline inference over an arbitrary number of views, flexibly incorporates auxiliary modalities such as camera parameters and depth maps, recovers geometry in metric scale measured in meters, and maintains bounded complexity over long horizons in in-the-wild environments.
@@ -191,7 +191,7 @@
     <!-- Hugging Face Demo -->
     <div class="demo-container" id="hf-demo">
         <h2>Demo</h2>
-        <p class="demo-description">Run UniT directly in the embedded Hugging Face Space.</p>
+        <p class="demo-description">Run UniT directly from the Hugging Face Space.</p>
         <div class="hf-space-wrapper">
             <iframe
                 src="https://enceladush-unit.hf.space/"
@@ -205,7 +205,7 @@
         </div>
         <p class="demo-link">
             <a href="https://enceladush-unit.hf.space/" target="_blank" rel="noopener noreferrer">
-                Open in Hugging Face Spaces →
+                Open Hugging Face Demo
             </a>
         </p>
     </div>
